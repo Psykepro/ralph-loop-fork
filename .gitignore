@@ -1,0 +1,17 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Backup / disabled files (kept out of source; git history is the source of truth)
+*.bak
+*.disabled
+
+# Logs
+*.log
+
+# Project-specific scratch directory (not part of the plugin)
+_project/

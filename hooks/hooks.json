@@ -1,0 +1,15 @@
+{
+  "description": "Ralph Loop Fork plugin hooks - forks to new terminal on stop",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-hook-fork.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
