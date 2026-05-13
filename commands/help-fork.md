@@ -1,10 +1,8 @@
 ---
-description: "Explain Ralph Loop Fork plugin and available commands"
+description: "Show Ralph Loop Fork command reference"
 ---
 
-# Ralph Loop Fork Plugin Help
-
-Please explain the following to the user:
+Print the following help reference to the user in full. Output every section exactly as written — do not summarize, shorten, or paraphrase.
 
 ## What is Ralph Loop Fork?
 
@@ -65,9 +63,10 @@ When using `--completion-promise`, the loop validates that all checklist items a
 1. Creates `.claude/ralph-fork/{LOOP_ID}/` directory with isolated state
 2. You work on the task
 3. When you try to exit:
-   - If `--max-per-session` reached: Fork to NEW terminal
    - If completion promise detected: Stop (success!)
    - If total budget exhausted: Stop
+   - If current iteration < `--max-per-session`: Re-feed prompt in the **same** session (same context window, fresh block)
+   - If `--max-per-session` reached: Fork to **NEW** terminal (fresh context window)
 4. New session reads global state and continues
 
 ---
@@ -186,8 +185,9 @@ Stop Event
     ├─ Total budget exhausted?
     │   └─ YES → EXIT (budget limit)
     │
-    └─ Max iterations reached?
-        └─ YES → FORK to new terminal
+    └─ Iteration < max-per-session?
+        ├─ YES → Re-feed prompt (same session, increments iteration counter)
+        └─ NO  → FORK to new terminal
 ```
 
 ## Comparison: ralph-loop vs ralph-loop-fork
