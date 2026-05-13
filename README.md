@@ -1,25 +1,47 @@
-# Ralph Loop Fork Plugin
+# Ralph Loop Fork
 
-Fork-based Ralph Loop implementation that spawns NEW terminal sessions on each
-iteration via tmux. Unlike standard ralph-loop which re-feeds the prompt in the
-same session, this version creates fresh sessions to maximize context window
-utilization.
+Fork-based Ralph Loop that spawns a **new tmux session per iteration**, keeping
+each session's context window completely fresh. Unlike the standard ralph-loop
+which re-feeds the prompt into the same session (accumulating context until the
+model degrades), this version forks a brand-new Claude process each time and
+tracks all state in files so work persists across sessions.
 
-**Supports parallel sessions**: Run multiple loops simultaneously with isolated
-state.
+**Supports parallel sessions**: run multiple independent loops simultaneously,
+each fully isolated.
+
+---
 
 ## Installation
 
-This is a Claude Code plugin. Install it via one of:
+### Via Claude Code plugin system (recommended)
 
-1. **Plugin marketplace (recommended)** — use `/plugin install` from Claude
-   Code and point it at this repository.
-2. **Manual install** — clone this repository and symlink it (or copy it) into
-   your local Claude Code plugin directory, e.g.
-   `~/.claude/plugins/marketplaces/local/ralph-loop-fork/`.
+```bash
+# 1. Add this repo as a plugin marketplace source
+/plugin marketplace add Psykepro/ralph-loop-fork
 
-After install, start a new Claude Code session — plugins are loaded at
-startup.
+# 2. Install the plugin
+/plugin install ralph-loop-fork@Psykepro-ralph-loop-fork
+
+# 3. Activate without restarting
+/reload-plugins
+```
+
+The commands become available as `/ralph-loop-fork:ralph-loop-fork`,
+`/ralph-loop-fork:cancel-ralph-fork`, and `/ralph-loop-fork:help-fork`.
+
+> **Scope**: installs at user scope by default (available in all projects).
+> Pass `--scope project` to scope it to a single repository.
+
+### Manual install
+
+```bash
+git clone https://github.com/Psykepro/ralph-loop-fork \
+  ~/.claude/plugins/marketplaces/local/ralph-loop-fork
+```
+
+Restart Claude Code — plugins are discovered at startup.
+
+---
 
 ## Dependencies
 
@@ -27,10 +49,8 @@ startup.
 - `jq` — JSON parsing
 - `bash` 4+ — included on macOS/Linux/WSL
 
-Install via your package manager:
-
 ```bash
-# macOS (Homebrew)
+# macOS
 brew install tmux jq
 
 # Debian / Ubuntu
@@ -40,64 +60,121 @@ sudo apt install tmux jq
 sudo pacman -S tmux jq
 ```
 
-For the checklist-progress hash the script also uses `md5sum` (Linux),
-falling back to `md5 -q` (macOS) or `shasum` if neither is present — no
-extra install needed on a standard system.
+For the checklist-progress hash the script uses `md5sum` (Linux), falling back
+to `md5 -q` (macOS) or `shasum` — no extra install needed on a standard system.
 
 ## Portability
 
-The plugin targets macOS, Linux, and Windows under **WSL2**. tmux does not run
-on native Windows / Git Bash; if you're on Windows install WSL2 and run the
-plugin from inside WSL. The scripts detect Git Bash / MSYS2 and print a
-pointer to that effect if tmux is missing.
+Targets macOS, Linux, and Windows under **WSL2**. tmux does not run on native
+Windows / Git Bash; if you are on Windows install WSL2 and run from inside WSL.
+The scripts detect Git Bash / MSYS2 and print a pointer to that effect if tmux
+is missing.
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/ralph-loop-fork:ralph-loop-fork` | Start fork-based Ralph loop |
-| `/ralph-loop-fork:cancel-ralph-fork` | Cancel/list active loops |
-| `/ralph-loop-fork:help-fork` | Show detailed help |
+---
 
 ## Quick Start
 
 ```bash
-# Basic usage with checklist
-/ralph-loop-fork:ralph-loop-fork --checklist path/to/checklist.md
+# Minimal — loop until budget exhausted
+/ralph-loop-fork:ralph-loop-fork --checklist my-checklist.md
 
-# With slash command
-/ralph-loop-fork:ralph-loop-fork --checklist checklist.md --command "/implement"
+# With a completion signal
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist my-checklist.md \
+  --completion-promise "ALL_DONE"
 
-# With loop name and completion promise
-/ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "csrf" --completion-promise 'ALL_COMPLETE'
+# Full workflow: implement each session, reflect on everything at the end
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist my-feature.md \
+  --command "/implement" \
+  --name "my-feature" \
+  --completion-promise "CHECKLIST_JOB_100%_COMPLETED" \
+  --on-completion "/reflect-learn" \
+  --total-budget 20 \
+  --max-per-session 1
 
-# Auto-generated loop ID (8-char hex)
-/ralph-loop-fork:ralph-loop-fork --checklist checklist.md --total-budget 10
-
-# Run multiple loops in parallel
+# Two independent loops running in parallel
 # Terminal 1:
-/ralph-loop-fork:ralph-loop-fork --checklist checklist-a.md --name "task-a" --completion-promise 'DONE'
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist feature-a.md --name "feat-a" --completion-promise "DONE"
 # Terminal 2:
-/ralph-loop-fork:ralph-loop-fork --checklist checklist-b.md --name "task-b" --completion-promise 'DONE'
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist feature-b.md --name "feat-b" --completion-promise "DONE"
 ```
+
+---
+
+## Working with project slash commands
+
+### `/implement` as `--command`
+
+Pass any slash command to `--command` and it runs at the start of each session
+alongside the checklist. `/implement` (or whichever implementation command your
+project defines) is the natural fit: each fresh session gets the same
+instruction to work through the checklist, picks up where the previous left
+off, and marks items `[x]` as it goes.
+
+```bash
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist path/to/feature-checklist.md \
+  --command "/implement" \
+  --name "auth-refactor" \
+  --completion-promise "CHECKLIST_JOB_100%_COMPLETED" \
+  --on-completion "/reflect-learn"
+```
+
+Each forked session starts with a clean context window but inherits the full
+checklist state — completed items stay `[x]`, session notes accumulate below
+the checklist, and the new session can orient itself instantly.
+
+### `/reflect-learn` as `--on-completion`
+
+`--on-completion` runs a slash command **once**, in the final session, after
+the completion promise is accepted. `/reflect-learn` is the recommended choice.
+
+Here is why it is especially powerful after a ralph-loop-fork run:
+
+- Every session appends notes to the checklist file as it works. By the time
+  the loop completes, the checklist contains a full log of findings, blockers,
+  decisions, and surprises — accumulated across every forked session.
+- `/reflect-learn` runs over all of that accumulated context in one pass,
+  extracting durable lessons: skills to update, rules to add, patterns to
+  remember for next time.
+- Because the loop explicitly separates *doing* (each session) from *learning*
+  (the final pass), the reflection is richer than what any single session could
+  produce — it sees the whole journey.
+
+```bash
+# The loop does the work; reflect-learn distils what was learned
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist path/to/checklist.md \
+  --command "/implement" \
+  --name "my-task" \
+  --completion-promise "CHECKLIST_JOB_100%_COMPLETED" \
+  --on-completion "/reflect-learn" \
+  --total-budget 30
+```
+
+---
 
 ## Arguments & Options
 
-| Argument/Option | Default | Description |
+| Option | Default | Description |
 |--------|---------|-------------|
-| `--checklist <path>` | (required) | Path to checklist markdown file |
-| `--command <cmd>` | null | Slash command to execute (optional) |
-| `--name <id>` | auto-generated | Loop identifier for parallel sessions |
-| `--total-budget <n>` | 100 | Total iterations across all sessions |
-| `--max-per-session <n>` | 1 | Iterations before forking to new session |
-| `--completion-promise <text>` | null | Promise phrase to signal completion |
-| `--on-completion <cmd>` | null | Slash command to run after successful completion |
-| `--stop-hook-reminders <text\|path>` | null | Custom reminders added to stop hook prompts (string or .md file) |
-| `--preserve-final-session` | false | Keep the final session at completion |
-| `--no-cleanup` | false | Don't cleanup any sessions at completion |
+| `--checklist <path>` | **required** | Path to checklist markdown file |
+| `--command <cmd>` | null | Slash command run at the start of each session |
+| `--name <id>` | auto 8-char hex | Loop identifier; used for tmux session names and state directory |
+| `--total-budget <n>` | 100 | Hard cap on total iterations across all sessions |
+| `--max-per-session <n>` | 1 | Iterations before forking a new session |
+| `--completion-promise <text>` | null | Phrase Claude must output in `<promise>` tags to end the loop |
+| `--on-completion <cmd>` | null | Slash command run once after successful completion |
+| `--stop-hook-reminders <text\|path>` | null | Extra text injected into every stop-hook prompt; string or `.md` file |
+| `--preserve-final-session` | false | Keep the final tmux session alive after completion |
+| `--no-cleanup` | false | Never kill any spawned sessions |
 
-The plugin always launches forked sessions with
-`claude --dangerously-skip-permissions`.
+Forked sessions always launch with `claude --dangerously-skip-permissions`.
+
+---
 
 ## Configuration
 
@@ -105,47 +182,9 @@ The plugin always launches forked sessions with
 |---------|---------|---------|
 | `RALPH_FORK_LOG_DIR` | `${TMPDIR:-/tmp}/ralph-fork-logs` | Where the stop hook writes its debug log |
 | `RALPH_LOG_RETENTION_DAYS` | `90` | How long to keep daily log files |
-| `RALPH_MAX_ARCHIVES` | `20` | How many completed-loop archives to keep |
+| `RALPH_MAX_ARCHIVES` | `20` | How many completed-loop archives to retain |
 
-## Checklist Validation
-
-When using `--completion-promise`, the loop validates that all checklist items
-are marked `[x]` before accepting completion:
-
-- If unchecked `- [ ]` items remain, the completion is **rejected**
-- A self-validation prompt is triggered to fix the discrepancy
-- Only when all items are `- [x]` will the promise be accepted
-
-This prevents false completion claims when work is not actually done.
-
-## Parallel Session Support
-
-Each loop is fully isolated with its own state directory:
-
-```
-.claude/ralph-fork/
-├── my-feature/              # Loop: my-feature
-│   ├── state.json             # Global state
-│   ├── local.md               # Current session state
-│   └── prompt.txt             # Prompt for forked sessions
-├── api-refactor/              # Loop: api-refactor
-│   ├── state.json
-│   ├── local.md
-│   └── prompt.txt
-└── a1b2c3d4/                  # Auto-generated loop ID
-    └── ...
-```
-
-### Session Naming
-
-Sessions follow the pattern: `ralph-{LOOP_ID}-{N}`
-
-Examples:
-- `ralph-my-feature-1` → First session of "my-feature" loop
-- `ralph-my-feature-2` → Second session (after fork)
-- `ralph-a1b2c3d4-1` → Auto-generated ID
-
-Sessions are managed via tmux and identifiable by their `ralph-{LOOP_ID}-{N}` naming.
+---
 
 ## How It Works
 
@@ -153,49 +192,112 @@ Sessions are managed via tmux and identifiable by their `ralph-{LOOP_ID}-{N}` na
 Session 1              Session 2              Session 3
 ┌─────────────┐        ┌─────────────┐        ┌─────────────┐
 │ 1. Read task│        │ 1. Read task│        │ 1. Read task│
-│ 2. Work...  │   ──►  │ 2. Work...  │   ──►  │ 2. Work...  │
-│ 3. Exit     │  FORK  │ 3. Exit     │  FORK  │ 3. Done!    │
+│ 2. Work...  │  FORK  │ 2. Work...  │  FORK  │ 2. Work...  │
+│ 3. Exit     │ ─────► │ 3. Exit     │ ─────► │ 3. Done!    │
 └─────────────┘        └─────────────┘        └─────────────┘
-  Fresh context          Fresh context          <promise>DONE
+  Fresh context          Fresh context         <promise>DONE
+                                               then /reflect-learn
 ```
 
-### Hook Behavior
+### Stop hook state machine
 
-**Stop Hook:**
-1. Discovers active loop from `.claude/ralph-fork/*/local.md`
-2. Check for completion promise → **Exit (success)**
-3. Check total budget → **Exit (limit reached)**
-4. Check session iterations < max → **Re-feed prompt (same session)**
-5. Otherwise → **Fork to new terminal**
+Every time a session tries to exit, the stop hook fires and decides what to do:
+
+1. **Token check** — confirms this event belongs to the active session (see below); stale events are silently dropped.
+2. **Promise check** — if `<promise>...</promise>` is present and all checklist items are `[x]`, move toward completion.
+3. **Budget check** — if `total_budget` is exhausted, exit cleanly.
+4. **Session limit** — if this session hasn't reached `max-per-session`, re-feed the prompt in the same session.
+5. **Fork** — otherwise, spawn a new tmux session and rotate the token.
+
+### Session tokens and hook isolation
+
+This is the mechanism that makes parallel loops and long multi-session runs
+safe.
+
+When a session starts, a unique 16-char token is embedded in its prompt:
+
+```
+RALPH LOOP CONTEXT (Loop: auth-refactor, Session 3, Token: 4a7f2b9e1c3d8e6f):
+```
+
+The stop hook reads this token from the session transcript and compares it
+against the token stored in `state.json`. If they don't match — meaning this
+event came from a session that has already been superseded by a fork — the hook
+silently ignores it. No phantom fork, no duplicate state update.
+
+When a new session is forked, the token is **rotated**: the old session's token
+is immediately invalidated in `state.json`, so even if it somehow fires the
+hook again it cannot interfere.
+
+This means:
+- Parallel loops with different `--name` values never cross-trigger each other's hooks.
+- A slow or crashed session that recovers late cannot cause a double-fork.
+- You can `tmux attach` to any session for inspection without disrupting the loop.
+
+### tmux session management
+
+Sessions are named `ralph-{LOOP_ID}-{N}`:
+
+```bash
+# Watch all active ralph sessions
+tmux ls | grep ralph
+
+# Attach to a specific session for inspection (read-only is fine)
+tmux attach -t ralph-auth-refactor-2
+
+# The loop manages cleanup automatically on completion
+# For manual intervention:
+tmux kill-session -t ralph-auth-refactor-1
+```
+
+State for each loop lives in `.claude/ralph-fork/{LOOP_ID}/`:
+
+```
+.claude/ralph-fork/
+├── auth-refactor/
+│   ├── state.json    # budget, session count, token, fork history
+│   ├── local.md      # per-session prompt + frontmatter
+│   └── prompt.txt    # raw prompt written for forked sessions to read
+└── .archive/
+    └── auth-refactor-20260513T142300/   # completed loops archived here
+```
+
+---
+
+## Checklist Validation
+
+When `--completion-promise` is set, the hook enforces completion
+programmatically — it does not rely on trust:
+
+- Claude outputs `<promise>ALL_DONE</promise>`
+- Hook counts unchecked `- [ ]` items in the checklist
+- If any remain → **rejected**, Claude is shown the checklist and must finish
+- When all items are `[x]` → hook asks for explicit confirmation
+- Claude outputs `<confirmed>YES</confirmed>`
+- Hook verifies boxes one more time before accepting
+
+This prevents false completion claims when work is not actually done.
+
+---
 
 ## Managing Loops
 
-### List Active Loops
-
 ```bash
+# List active loops (shows iterations/budget per loop)
 /ralph-loop-fork:cancel-ralph-fork --list
-```
 
-Shows each active loop with `active`, `sessions`, and `iterations/budget`.
+# Cancel a specific loop — kills its tmux sessions + removes state
+/ralph-loop-fork:cancel-ralph-fork auth-refactor
 
-### Cancel Specific Loop
-
-```bash
-/ralph-loop-fork:cancel-ralph-fork my-feature
-```
-
-Kills every tmux session belonging to the loop (spawned sessions plus the
-original launcher) and removes its state directory at
-`.claude/ralph-fork/<LOOP_ID>/`.
-
-### Cancel All Loops
-
-```bash
+# Cancel all loops (archives are preserved)
 /ralph-loop-fork:cancel-ralph-fork --all
 ```
 
-Same as above for every loop. The `.claude/ralph-fork/.archive/` directory is
-preserved.
+> **Cancel vs. complete**: `cancel-ralph-fork` removes the state directory
+> *without* archiving it and kills all associated tmux sessions. Normally
+> completed loops are moved to `.claude/ralph-fork/.archive/` automatically.
+
+---
 
 ## Monitoring
 
@@ -203,65 +305,53 @@ preserved.
 # List all loops
 ls -la .claude/ralph-fork/
 
-# View specific loop state
-cat .claude/ralph-fork/my-feature/state.json | jq
+# Inspect loop state
+cat .claude/ralph-fork/auth-refactor/state.json | jq
 
-# View current session
-head -10 .claude/ralph-fork/my-feature/local.md
+# View current session prompt
+head -20 .claude/ralph-fork/auth-refactor/local.md
 
-# List all ralph tmux sessions
+# Watch all ralph tmux sessions
 tmux ls | grep ralph
 
-# List sessions for specific loop
-tmux ls | grep my-feature
+# Attach to a running session
+tmux attach -t ralph-auth-refactor-2
 
-# Attach to a session
-tmux attach -t ralph-my-feature-1
+# View debug log
+tail -f "${RALPH_FORK_LOG_DIR:-/tmp/ralph-fork-logs}/ralph-fork-$(date +%Y-%m-%d).log"
 ```
 
-## Completion
+---
 
-To complete the loop, output the exact promise phrase:
+## Comparison with standard ralph-loop
 
-```
-<promise>YOUR_COMPLETION_PROMISE</promise>
-```
-
-The hook then asks for an explicit confirmation:
-
-```
-<confirmed>YES</confirmed>
-```
-
-Only after both, with every checklist item marked `[x]`, does the loop accept
-completion.
-
-**CRITICAL**: Only output the promise when the statement is completely and
-unequivocally TRUE.
-
-## Comparison with Standard Ralph Loop
-
-| Feature | `/ralph-loop` | `/ralph-loop-fork:ralph-loop-fork` |
+| Feature | `/ralph-loop` | `/ralph-loop-fork` |
 |---------|--------------|-------------------|
-| Context handling | Accumulates each iteration | Fresh each fork |
-| Session count | 1 | Multiple |
-| Best for | Short tasks | Long, complex tasks |
-| Visibility | Single terminal | tmux sessions |
-| State | Single local file | Isolated per loop |
-| Parallel support | No | Yes (via --name) |
+| Context handling | Accumulates every iteration | Fresh context each fork |
+| Session count | 1 | Multiple (one per fork) |
+| Best for | Short tasks | Long, complex, multi-session tasks |
+| Visibility | Single terminal | Named tmux sessions |
+| State persistence | Single local file | Isolated per loop in `.claude/ralph-fork/` |
+| Parallel loops | No | Yes — via `--name` |
+| Hook isolation | N/A | Session tokens prevent cross-session triggers |
+| Post-completion hook | No | Yes — `--on-completion` |
+
+---
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Commands not recognized | Restart Claude Code (plugins cached at startup) |
-| `tmux is required but was not found` | Install via your package manager (`apt install tmux`, `brew install tmux`, etc.). On Windows install WSL2. |
-| `jq is required but was not found` | Install via your package manager (`apt install jq`, `brew install jq`, etc.). |
-| Fork not spawning | Verify tmux installed: `tmux -V` |
-| Session exists error | Remove old sessions: `tmux kill-session -t ralph-LOOP_ID-N` |
+| Commands not recognized after install | Run `/reload-plugins` — no restart needed |
+| `tmux is required but was not found` | Install via your package manager. On Windows: install WSL2 and run from inside WSL. |
+| `jq is required but was not found` | Install via your package manager (`apt install jq`, `brew install jq`, etc.) |
+| Fork not spawning | Verify tmux: `tmux -V` |
+| Session already exists error | Remove stale session: `tmux kill-session -t ralph-LOOP_ID-N` |
 | State corrupted | Cancel and restart: `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` |
-| Loop ID conflict | Use unique `--name` or let it auto-generate |
-| Wrong loop triggered | Check `.claude/ralph-fork/*/local.md` exists only for active loop |
+| Loop ID conflict | Use a unique `--name` or omit it for auto-generated ID |
+| Wrong loop triggered | Check only one `local.md` exists: `ls .claude/ralph-fork/*/local.md` |
+
+---
 
 ## Running tests
 
@@ -270,30 +360,34 @@ bash tests/test-state-tracking.sh
 bash tests/test-stop-hook-states.sh
 ```
 
+---
+
 ## File Structure
 
 ```
 ralph-loop-fork/
 ├── .claude-plugin/
-│   └── plugin.json              # Plugin manifest
+│   └── plugin.json                  # Plugin manifest
 ├── hooks/
-│   ├── hooks.json               # Hook registration (Stop)
-│   └── stop-hook-fork.sh        # Stop hook (main fork logic)
+│   ├── hooks.json                   # Hook registration (Stop event)
+│   └── stop-hook-fork.sh            # Stop hook — state machine, fork logic
 ├── scripts/
-│   ├── setup-ralph-loop-fork.sh # Setup script
-│   ├── fork-terminal.sh         # Fork execution
-│   └── cancel-ralph-loop-fork.sh # Cancel/list script
+│   ├── setup-ralph-loop-fork.sh     # Initialisation script
+│   ├── fork-terminal.sh             # tmux fork spawner
+│   └── cancel-ralph-loop-fork.sh    # Cancel / list script
 ├── commands/
-│   ├── ralph-loop-fork.md       # Main command
-│   ├── cancel-ralph-fork.md     # Cancel command
-│   └── help-fork.md             # Help command
+│   ├── ralph-loop-fork.md           # Main command
+│   ├── cancel-ralph-fork.md         # Cancel command
+│   └── help-fork.md                 # Help command
 ├── tests/
 │   ├── test-state-tracking.sh
 │   └── test-stop-hook-states.sh
 ├── CONTRIBUTING.md
-├── LICENSE                      # MIT
-└── README.md                    # This file
+├── LICENSE                          # MIT
+└── README.md
 ```
+
+---
 
 ## Credits
 
