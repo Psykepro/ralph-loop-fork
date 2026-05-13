@@ -20,7 +20,7 @@ each fully isolated.
 /plugin marketplace add Psykepro/ralph-loop-fork
 
 # 2. Install the plugin
-/plugin install ralph-loop-fork@Psykepro-ralph-loop-fork
+/plugin install ralph-loop-fork@Psykepro/ralph-loop-fork
 
 # 3. Activate without restarting
 /reload-plugins
