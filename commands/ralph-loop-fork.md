@@ -62,7 +62,7 @@ You will work on the task provided. When you try to exit:
 2. **If completion promise detected**: You exit normally (success!)
 3. **If total budget reached**: Loop stops with summary
 
-Unlike standard /ralph-loop which re-feeds the prompt in the SAME session, /ralph-loop-fork:ralph-loop-fork creates FRESH sessions. This maximizes your context window for complex, long-running tasks.
+Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until context fills up, /ralph-loop-fork:ralph-loop-fork forks a FRESH session once a session's iteration limit is reached. With --max-per-session 1 (default) every exit triggers a fork; set it higher to allow multiple re-feed iterations within one session before forking.
 
 ## Key Options
 

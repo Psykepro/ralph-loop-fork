@@ -1,10 +1,14 @@
 # Ralph Loop Fork
 
-Fork-based Ralph Loop that spawns a **new tmux session per iteration**, keeping
-each session's context window completely fresh. Unlike the standard ralph-loop
-which re-feeds the prompt into the same session (accumulating context until the
-model degrades), this version forks a brand-new Claude process each time and
-tracks all state in files so work persists across sessions.
+Fork-based Ralph Loop that keeps each session's context window fresh by
+spawning a **new tmux session** when a session's iteration limit is reached.
+Unlike the standard ralph-loop which re-feeds the prompt into the same session
+until context accumulates and the model degrades, this version forks a
+brand-new Claude process at the configured boundary and tracks all state in
+files so work persists across sessions.
+
+With the default `--max-per-session 1` every exit triggers a fork. Set it
+higher to allow multiple re-feed iterations within one session before forking.
 
 **Supports parallel sessions**: run multiple independent loops simultaneously,
 each fully isolated.

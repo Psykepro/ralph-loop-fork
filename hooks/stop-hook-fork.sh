@@ -1296,24 +1296,75 @@ WARNING: Do NOT confirm if you have ANY doubt."
   exit 0
 
 else
-  # No promise detected - transition to AWAITING_CHECKLIST_UPDATE
-  debug_log "TRANSITION: RUNNING → AWAITING_CHECKLIST_UPDATE"
-  info "Ralph Loop Fork [$LOOP_ID]: Session ending, requesting checklist update..."
-  info ""
+  # No promise detected — check if we can re-feed in the same session or must fork
+  if [[ $LOCAL_ITERATION -lt $MAX_PER_SESSION ]]; then
+    # Still within session iteration budget — re-feed in the same session
+    NEW_ITERATION=$((LOCAL_ITERATION + 1))
+    debug_log "TRANSITION: RUNNING → RUNNING (re-feed, iteration $LOCAL_ITERATION → $NEW_ITERATION of $MAX_PER_SESSION)"
+    info "Ralph Loop Fork [$LOOP_ID]: Iteration $LOCAL_ITERATION/$MAX_PER_SESSION — continuing in same session..."
+    info ""
 
-  update_state "$STATE_FILE" ".awaiting_checklist_update = true"
+    # Increment iteration counter in local.md frontmatter (portable sed)
+    sed -i.bak "s/^iteration: .*/iteration: $NEW_ITERATION/" "$LOCAL_FILE" && rm -f "${LOCAL_FILE}.bak"
 
-  CHECKLIST_CONTENT=""
-  CHECKED_COUNT=0
-  UNCHECKED_COUNT=0
-  if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
-    CHECKLIST_CONTENT=$(read_checklist_content "$CHECKLIST_PATH")
-    ITEM_COUNTS=$(count_checklist_items "$CHECKLIST_PATH")
-    UNCHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f1)
-    CHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f2)
-  fi
+    CHECKLIST_CONTENT=""
+    CHECKED_COUNT=0
+    UNCHECKED_COUNT=0
+    if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+      CHECKLIST_CONTENT=$(read_checklist_content "$CHECKLIST_PATH")
+      ITEM_COUNTS=$(count_checklist_items "$CHECKLIST_PATH")
+      UNCHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f1)
+      CHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f2)
+    fi
 
-  UPDATE_PROMPT="RALPH LOOP: SESSION ENDING - UPDATE CHECKLIST
+    REMAINING=$((MAX_PER_SESSION - LOCAL_ITERATION))
+
+    REFEED_PROMPT="RALPH LOOP: CONTINUE WORKING (Session $SESSION_NUMBER, Iteration $NEW_ITERATION/$MAX_PER_SESSION)
+
+You have $REMAINING more iteration(s) available in this session before a fresh session is forked.
+
+Continue working on the checklist until all items are complete.
+
+CURRENT STATUS: $CHECKED_COUNT checked, $UNCHECKED_COUNT unchecked
+
+$(if [[ -n "$CHECKLIST_CONTENT" ]]; then echo "=== CHECKLIST ===" && echo "$CHECKLIST_CONTENT" && echo "=== END CHECKLIST ==="; fi)
+$(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; then echo "
+=== REMINDERS ===
+$STOP_HOOK_REMINDERS
+=== END REMINDERS ==="; fi)
+
+$(if [[ "$COMPLETION_PROMISE" != "null" ]] && [[ -n "$COMPLETION_PROMISE" ]]; then echo "When ALL work is 100% complete, output:
+<promise>$COMPLETION_PROMISE</promise>"; fi)"
+
+    jq -n \
+      --arg prompt "$REFEED_PROMPT" \
+      --arg msg "Ralph [$LOOP_ID]: Continue (iteration $NEW_ITERATION/$MAX_PER_SESSION)" \
+      '{
+        "decision": "block",
+        "reason": $prompt,
+        "systemMessage": $msg
+      }'
+    exit 0
+
+  else
+    # Iteration limit reached — transition to AWAITING_CHECKLIST_UPDATE (fork path)
+    debug_log "TRANSITION: RUNNING → AWAITING_CHECKLIST_UPDATE (iteration $LOCAL_ITERATION/$MAX_PER_SESSION exhausted)"
+    info "Ralph Loop Fork [$LOOP_ID]: Session iteration limit reached ($LOCAL_ITERATION/$MAX_PER_SESSION), requesting checklist update before forking..."
+    info ""
+
+    update_state "$STATE_FILE" ".awaiting_checklist_update = true"
+
+    CHECKLIST_CONTENT=""
+    CHECKED_COUNT=0
+    UNCHECKED_COUNT=0
+    if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+      CHECKLIST_CONTENT=$(read_checklist_content "$CHECKLIST_PATH")
+      ITEM_COUNTS=$(count_checklist_items "$CHECKLIST_PATH")
+      UNCHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f1)
+      CHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f2)
+    fi
+
+    UPDATE_PROMPT="RALPH LOOP: SESSION ENDING - UPDATE CHECKLIST
 
 Before this session ends, please update the checklist.
 
@@ -1344,15 +1395,16 @@ REQUIRED ACTIONS:
 
 After updating, you may exit. A fresh session will continue the work."
 
-  jq -n \
-    --arg prompt "$UPDATE_PROMPT" \
-    --arg msg "Ralph [$LOOP_ID]: Update checklist ($CHECKED_COUNT/$((CHECKED_COUNT + UNCHECKED_COUNT)) complete)" \
-    '{
-      "decision": "block",
-      "reason": $prompt,
-      "systemMessage": $msg
-    }'
-  exit 0
+    jq -n \
+      --arg prompt "$UPDATE_PROMPT" \
+      --arg msg "Ralph [$LOOP_ID]: Update checklist ($CHECKED_COUNT/$((CHECKED_COUNT + UNCHECKED_COUNT)) complete)" \
+      '{
+        "decision": "block",
+        "reason": $prompt,
+        "systemMessage": $msg
+      }'
+    exit 0
+  fi
 fi
 
 debug_log "Hook completed - end of script"
