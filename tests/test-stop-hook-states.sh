@@ -418,7 +418,7 @@ test_no_promise() {
 
   local output=$(run_hook "$transcript_file")
 
-  assert_contains "Session ending" "$output" "Output mentions session ending"
+  assert_contains "SESSION ENDING" "$output" "Output mentions session ending"
   assert_state_flag "$loop_id" "awaiting_checklist_update" "true" "awaiting_checklist_update flag set"
   assert_contains "block" "$output" "Hook returns BLOCK decision for checklist update"
 

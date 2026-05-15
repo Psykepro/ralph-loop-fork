@@ -39,6 +39,68 @@ fi
 # Helpers
 # ============================================================================
 
+# Resolve the on-disk directory for a loop_id. Looks in the current repo's
+# .claude/ralph-fork/ first; if not found, walks every git worktree and
+# returns the first match. Prints the resolved path, or empty if not found.
+resolve_loop_dir() {
+  local loop_id="$1"
+
+  if [[ -d "$RALPH_FORK_DIR/$loop_id" ]]; then
+    printf '%s\n' "$RALPH_FORK_DIR/$loop_id"
+    return 0
+  fi
+
+  # Worktree fallback: --worktree mode moves the state dir into the worktree.
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    while IFS= read -r wt; do
+      [[ -z "$wt" ]] && continue
+      if [[ -d "$wt/.claude/ralph-fork/$loop_id" ]]; then
+        printf '%s\n' "$wt/.claude/ralph-fork/$loop_id"
+        return 0
+      fi
+    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  fi
+
+  return 0
+}
+
+# Enumerate every loop_id known to this repo: every direct child of
+# .claude/ralph-fork/ in the current dir AND in every linked worktree.
+# Outputs newline-separated, deduped loop_ids (excluding the archive dir).
+enumerate_all_loop_ids() {
+  local out=""
+
+  if [[ -d "$RALPH_FORK_DIR" ]]; then
+    for dir in "$RALPH_FORK_DIR"/*/; do
+      [[ -d "$dir" ]] || continue
+      local name
+      name=$(basename "$dir")
+      [[ "$name" == "$ARCHIVE_DIR_NAME" ]] && continue
+      out+="$name"$'\n'
+    done
+  fi
+
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    while IFS= read -r wt; do
+      [[ -z "$wt" ]] && continue
+      [[ "$wt" == "$(pwd)" ]] && continue
+      local wt_ralph="$wt/.claude/ralph-fork"
+      [[ -d "$wt_ralph" ]] || continue
+      for dir in "$wt_ralph"/*/; do
+        [[ -d "$dir" ]] || continue
+        local name
+        name=$(basename "$dir")
+        [[ "$name" == "$ARCHIVE_DIR_NAME" ]] && continue
+        out+="$name"$'\n'
+      done
+    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  fi
+
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out" | awk 'NF && !seen[$0]++'
+  fi
+}
+
 # Kill a single tmux session if it exists. Never fails the script.
 kill_tmux_session() {
   local session_name="$1"
@@ -63,7 +125,12 @@ kill_tmux_session() {
 # Outputs newline-separated, deduped, non-empty session names.
 collect_sessions_for_loop() {
   local loop_id="$1"
-  local state_file="$RALPH_FORK_DIR/$loop_id/state.json"
+  local loop_dir
+  loop_dir=$(resolve_loop_dir "$loop_id")
+  local state_file=""
+  if [[ -n "$loop_dir" ]]; then
+    state_file="$loop_dir/state.json"
+  fi
   local sessions=""
 
   if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
@@ -109,15 +176,25 @@ $from_tmux"
 # Print a one-line summary of a loop directory.
 print_loop_summary() {
   local loop_id="$1"
-  local state_file="$RALPH_FORK_DIR/$loop_id/state.json"
+  local loop_dir
+  loop_dir=$(resolve_loop_dir "$loop_id")
+  local state_file=""
+  if [[ -n "$loop_dir" ]]; then
+    state_file="$loop_dir/state.json"
+  fi
 
   if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
-    local active sessions iterations budget
+    local active sessions iterations budget worktree
     active=$(jq -r '.active // false' "$state_file" 2>/dev/null || echo "unknown")
     sessions=$(jq -r '.session_number // 0' "$state_file" 2>/dev/null || echo "0")
     iterations=$(jq -r '.total_iterations // 0' "$state_file" 2>/dev/null || echo "0")
     budget=$(jq -r '.total_budget // 0' "$state_file" 2>/dev/null || echo "0")
-    echo "  $loop_id: active=$active, sessions=$sessions, iterations=$iterations/$budget"
+    worktree=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null || echo "")
+    if [[ -n "$worktree" ]]; then
+      echo "  $loop_id: active=$active, sessions=$sessions, iterations=$iterations/$budget, worktree=$worktree"
+    else
+      echo "  $loop_id: active=$active, sessions=$sessions, iterations=$iterations/$budget"
+    fi
   else
     echo "  $loop_id: (state.json unreadable)"
   fi
@@ -126,9 +203,10 @@ print_loop_summary() {
 # Cancel one loop: kill its tmux sessions, then remove its state dir.
 cancel_loop() {
   local loop_id="$1"
-  local loop_dir="$RALPH_FORK_DIR/$loop_id"
+  local loop_dir
+  loop_dir=$(resolve_loop_dir "$loop_id")
 
-  if [[ ! -d "$loop_dir" ]]; then
+  if [[ -z "$loop_dir" ]] || [[ ! -d "$loop_dir" ]]; then
     echo "Error: Loop not found: $loop_id" >&2
     return 1
   fi
@@ -137,14 +215,22 @@ cancel_loop() {
   print_loop_summary "$loop_id"
 
   # IMPORTANT ORDER OF OPERATIONS:
-  # 1. Collect session names into a variable FIRST (while state.json is intact).
+  # 1. Snapshot info we need AFTER state.json is gone (sessions, worktree_path).
   # 2. Remove the state directory NEXT, so a failure mid-cleanup (e.g. our own
   #    shell getting SIGHUP'd because we kill its host tmux session) still
   #    leaves the loop fully cancelled from the user's point of view.
   # 3. Kill tmux sessions LAST. We may kill our own host session — that's fine;
   #    by then the durable cleanup is already done.
-  local sessions
+  # 4. Print worktree cleanup hint AFTER kill (the worktree dir itself is left
+  #    in place so the user can inspect it before removing).
+  local sessions worktree_path
   sessions=$(collect_sessions_for_loop "$loop_id")
+
+  worktree_path=""
+  local state_file="$loop_dir/state.json"
+  if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
+    worktree_path=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null || true)
+  fi
 
   if [[ -n "$loop_id" ]] && [[ -d "$loop_dir" ]]; then
     rm -rf -- "$loop_dir"
@@ -159,6 +245,39 @@ cancel_loop() {
     echo "  No tmux sessions found to kill."
   fi
 
+  # Worktree cleanup hint (worktree itself is NOT auto-removed — user may want
+  # to inspect or merge before discarding).
+  if [[ -n "$worktree_path" ]]; then
+    if [[ -d "$worktree_path" ]]; then
+      local branch
+      branch=""
+      if command -v git >/dev/null 2>&1; then
+        branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+      fi
+      echo ""
+      echo "Worktree detected at: $worktree_path${branch:+ (branch: $branch)}"
+      echo "To merge and remove:"
+      if [[ -n "$branch" ]]; then
+        echo "  git merge $branch"
+        echo "  git worktree remove $worktree_path"
+        echo "  git branch -D $branch"
+      else
+        echo "  git worktree remove $worktree_path"
+      fi
+    else
+      # Worktree dir was manually removed but the branch may still exist.
+      # Surface a hint so the user can clean up the leftover branch.
+      local guessed_branch="ralph/$loop_id"
+      if command -v git >/dev/null 2>&1 && git rev-parse --verify "refs/heads/$guessed_branch" >/dev/null 2>&1; then
+        echo ""
+        echo "Worktree directory $worktree_path no longer exists."
+        echo "Branch $guessed_branch still exists. To remove:"
+        echo "  git worktree prune"
+        echo "  git branch -D $guessed_branch"
+      fi
+    fi
+  fi
+
   return 0
 }
 
@@ -170,23 +289,13 @@ MODE="${1:-}"
 case "$MODE" in
   ""|--list|-l)
     # ----- LIST MODE (read-only) -----
-    if [[ ! -d "$RALPH_FORK_DIR" ]]; then
-      echo "No active Ralph Loop Fork sessions."
-      exit 0
-    fi
-
     echo "Active Ralph Loop Fork sessions:"
     found_any=false
-    for dir in "$RALPH_FORK_DIR"/*/; do
-      [[ -d "$dir" ]] || continue
-      loop_id=$(basename "$dir")
-      # Skip the archive directory if present
-      if [[ "$loop_id" == "$ARCHIVE_DIR_NAME" ]]; then
-        continue
-      fi
+    while IFS= read -r loop_id; do
+      [[ -z "$loop_id" ]] && continue
       print_loop_summary "$loop_id"
       found_any=true
-    done
+    done < <(enumerate_all_loop_ids)
 
     if [[ "$found_any" == "false" ]]; then
       echo "  (none)"
@@ -196,25 +305,19 @@ case "$MODE" in
 
   --all|-a)
     # ----- CANCEL ALL -----
-    if [[ ! -d "$RALPH_FORK_DIR" ]]; then
-      echo "No active Ralph Loop Fork sessions."
-      exit 0
-    fi
-
     cancelled=0
-    for dir in "$RALPH_FORK_DIR"/*/; do
-      [[ -d "$dir" ]] || continue
-      loop_id=$(basename "$dir")
-      # IMPORTANT: never touch the .archive/ directory
-      if [[ "$loop_id" == "$ARCHIVE_DIR_NAME" ]]; then
-        continue
-      fi
+    while IFS= read -r loop_id; do
+      [[ -z "$loop_id" ]] && continue
       cancel_loop "$loop_id" || true
       cancelled=$((cancelled + 1))
       echo ""
-    done
+    done < <(enumerate_all_loop_ids)
 
-    echo "Cancelled $cancelled loop(s). Archive directory preserved."
+    if [[ "$cancelled" -eq 0 ]]; then
+      echo "No active Ralph Loop Fork sessions."
+    else
+      echo "Cancelled $cancelled loop(s). Archive directory preserved."
+    fi
     exit 0
     ;;
 
@@ -255,7 +358,8 @@ HELP_EOF
       exit 1
     fi
 
-    if [[ ! -d "$RALPH_FORK_DIR/$LOOP_ID" ]]; then
+    RESOLVED=$(resolve_loop_dir "$LOOP_ID")
+    if [[ -z "$RESOLVED" ]] || [[ ! -d "$RESOLVED" ]]; then
       echo "Error: Loop not found: $LOOP_ID" >&2
       echo "Run with --list to see active loops." >&2
       exit 1

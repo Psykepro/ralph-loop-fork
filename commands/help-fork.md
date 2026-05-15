@@ -55,6 +55,10 @@ Start a fork-based Ralph loop.
 - `--stop-hook-reminders <text|path>` - Custom reminders added to stop hook prompts
 - `--preserve-final-session` - Keep the final session at completion (default: false)
 - `--no-cleanup` - Don't cleanup any sessions at completion (default: false)
+- `--worktree` - Run the loop inside an isolated git worktree (default: `false`; see Worktree Mode below)
+- `--worktree-base <dir>` - Parent dir for worktrees (default: `.worktrees`)
+- `--branch <name>` - Branch name for the worktree (default: `ralph/<loop-id>`)
+- `--copy-paths "<a b c>"` - Extra files/dirs to copy into the worktree (space-separated inside a single quoted arg)
 
 **Checklist Validation:**
 When using `--completion-promise`, the loop validates that all checklist items are marked `[x]` before accepting completion. If unchecked items remain, the completion is rejected and a self-validation prompt is triggered.
@@ -115,6 +119,58 @@ Each loop is fully isolated:
 ```
 
 Sessions are named `ralph-{LOOP_ID}-{N}` and managed via tmux.
+
+---
+
+## Worktree Mode
+
+Pass `--worktree` to run the entire loop inside a git worktree. The loop's commits land on a dedicated branch, leaving the main branch untouched until you choose to merge.
+
+```bash
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist path/to/checklist.md \
+  --name "feat-x" \
+  --completion-promise "ALL_DONE" \
+  --worktree \
+  --copy-paths "_project/docs docs/specs"
+```
+
+**What it does:**
+
+1. Creates a worktree at `<worktree-base>/<loop-id>` on a new branch `ralph/<loop-id>`.
+2. Copies the minimum set of files into the worktree: `CLAUDE.md`, a curated subset of `.claude/` (`skills`, `commands`, `settings*.json`), `.claude/ralph-fork/` (excluding `.archive/`), the checklist directory, all `.env*` files, plus anything passed via `--copy-paths`.
+3. Moves the freshly-created loop state into the worktree.
+4. Launches the initial Claude session via tmux inside the worktree. All forked sessions run there as well — no extra wiring needed.
+
+**Flags:**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--worktree` | `false` | Enable worktree mode |
+| `--no-worktree` | (default) | Explicit opt-out (documents intent) |
+| `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree |
+| `--branch <name>` | `ralph/<loop-id>` | Branch name to create |
+| `--copy-paths "<a b c>"` | none | Extra files/dirs to copy in (space-separated inside one quoted arg) |
+
+**Restrictions:**
+
+- `--worktree` cannot be combined with `--resume` (resume already runs from the existing worktree).
+
+**Post-completion merge workflow:**
+
+```bash
+# Review what changed on the worktree branch:
+git log main..ralph/<loop-id> --oneline
+
+# Merge (or cherry-pick) into main:
+git merge ralph/<loop-id>
+
+# Remove the worktree and delete the branch:
+git worktree remove .worktrees/<loop-id>
+git branch -D ralph/<loop-id>
+```
+
+`cancel-ralph-fork` prints these commands automatically when a worktree is detected.
 
 ---
 

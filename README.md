@@ -161,6 +161,74 @@ Here is why it is especially powerful after a ralph-loop-fork run:
 
 ---
 
+## Worktree Mode
+
+Pass `--worktree` to run the entire loop inside an isolated git worktree. The
+loop's commits land on a dedicated branch (`ralph/<loop-id>` by default), and
+the main branch is never touched until you choose to merge.
+
+```bash
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist path/to/checklist.md \
+  --command "/implement" \
+  --name "feat-x" \
+  --completion-promise "CHECKLIST_JOB_100%_COMPLETED" \
+  --on-completion "/reflect-learn" \
+  --total-budget 30 \
+  --worktree \
+  --copy-paths "docs/specs notes/research"
+```
+
+**What happens:**
+
+1. `git worktree add .worktrees/feat-x -b ralph/feat-x` creates the worktree on a new branch.
+2. A curated set of files is copied in: `CLAUDE.md`, `.claude/skills`, `.claude/commands`, `.claude/settings*.json`, `.claude/ralph-fork/` (excluding `.archive/`), the checklist directory, every `.env*` file at the root, plus anything from `--copy-paths`.
+3. The freshly-created loop state directory is moved into the worktree.
+4. The initial Claude session is launched inside the worktree via tmux. All forked sessions continue running there — `fork-terminal.sh` and `stop-hook-fork.sh` need zero changes to follow along.
+
+**Why use it:**
+
+- The main branch stays clean — no half-finished commits, no merge conflicts during interactive work.
+- The whole loop can be merged or discarded as a single unit.
+- Multiple independent loops can run on the same project without stepping on each other's working tree.
+
+**Flag reference (worktree-related):**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--worktree` | `false` | Enable worktree mode |
+| `--no-worktree` | (default) | Explicit opt-out |
+| `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree |
+| `--branch <name>` | `ralph/<loop-id>` | Branch name to create |
+| `--copy-paths "<a b c>"` | none | Extra files/dirs to copy in; space-separated inside a single quoted arg |
+
+**Restrictions:**
+
+- `--worktree` is **not** compatible with `--resume`. Resume runs from the existing worktree directly.
+- The worktree itself is **not** auto-removed by `cancel-ralph-fork` — you may want to inspect or merge it first. The cancel command prints the exact cleanup commands.
+
+### Post-completion merge workflow
+
+After the loop finishes (either via the completion promise or by exhausting the
+budget), merge or discard the branch as a unit:
+
+```bash
+# Review what changed on the worktree branch
+git log main..ralph/<loop-id> --oneline
+
+# Merge (or cherry-pick) into main
+git merge ralph/<loop-id>
+
+# Remove the worktree and delete the branch
+git worktree remove .worktrees/<loop-id>
+git branch -D ralph/<loop-id>
+```
+
+`cancel-ralph-fork` prints these exact commands whenever a worktree is detected
+in the loop's `state.json`.
+
+---
+
 ## Arguments & Options
 
 | Option | Default | Description |
@@ -175,6 +243,11 @@ Here is why it is especially powerful after a ralph-loop-fork run:
 | `--stop-hook-reminders <text\|path>` | null | Extra text injected into every stop-hook prompt; string or `.md` file |
 | `--preserve-final-session` | false | Keep the final tmux session alive after completion |
 | `--no-cleanup` | false | Never kill any spawned sessions |
+| `--worktree` | false | Run the loop inside an isolated git worktree (see **Worktree Mode**) |
+| `--no-worktree` | (default) | Explicit opt-out; documents intent |
+| `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree (only with `--worktree`) |
+| `--branch <name>` | `ralph/<loop-id>` | Branch name for the worktree (only with `--worktree`) |
+| `--copy-paths "<a b c>"` | none | Extra files/dirs to copy into the worktree, space-separated inside one quoted arg |
 
 Forked sessions always launch with `claude --dangerously-skip-permissions`.
 
@@ -377,6 +450,7 @@ ralph-loop-fork/
 │   └── stop-hook-fork.sh            # Stop hook — state machine, fork logic
 ├── scripts/
 │   ├── setup-ralph-loop-fork.sh     # Initialisation script
+│   ├── setup-worktree.sh            # Worktree creation + file population
 │   ├── fork-terminal.sh             # tmux fork spawner
 │   └── cancel-ralph-loop-fork.sh    # Cancel / list script
 ├── commands/
