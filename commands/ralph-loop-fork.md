@@ -1,6 +1,6 @@
 ---
 description: "Start fork-based Ralph Loop (spawns new terminal each iteration)"
-argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup]"
+argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup] [--worktree] [--worktree-base DIR] [--branch NAME] [--copy-paths \"P1 P2\"]"
 allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/setup-ralph-loop-fork.sh:*)"]
 hide-from-slash-command-tool: "true"
 ---
@@ -78,6 +78,10 @@ Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until 
 | `--max-per-session <n>` | Max iterations per session before forking | 1 |
 | `--preserve-final-session` | Don't cleanup final session at completion (preserve report) | false |
 | `--no-cleanup` | Don't cleanup any sessions at completion | false |
+| `--worktree` | Run the loop in an isolated git worktree | false |
+| `--worktree-base <dir>` | Parent dir for the worktree (only with `--worktree`) | `.worktrees` |
+| `--branch <name>` | Branch name for the worktree (only with `--worktree`) | `ralph/<loop-id>` |
+| `--copy-paths "<a b c>"` | Extra files/dirs to copy into the worktree (space-sep inside one quoted arg) | none |
 
 ## Command vs On-Completion
 
@@ -142,6 +146,27 @@ Use `--name` to run multiple loops in parallel with isolated state:
 Each loop gets its own directory: `.claude/ralph-fork/{LOOP_ID}/`
 
 Sessions are named `ralph-{LOOP_ID}-{N}` and managed via tmux.
+
+## Worktree Mode
+
+`--worktree` runs the entire loop inside a git worktree, so the loop's commits land on a dedicated branch and the main branch is never touched until you choose to merge.
+
+```bash
+/ralph-loop-fork:ralph-loop-fork \
+  --checklist path/to/checklist.md \
+  --name "feat-x" \
+  --worktree \
+  --copy-paths "_project/docs docs/specs"
+```
+
+Behaviour:
+
+- Creates worktree at `<worktree-base>/<loop-id>` on branch `ralph/<loop-id>` (override either with `--worktree-base` and `--branch`).
+- Copies CLAUDE.md, a curated subset of `.claude/` (skills, commands, settings), the checklist directory, all `.env*` files, and any `--copy-paths` entries.
+- Launches the initial Claude session via tmux pointing at the worktree. All forked sessions continue inside the worktree without further intervention.
+- `cancel-ralph-fork` detects the worktree and prints `git merge / git worktree remove / git branch -D` commands — the worktree itself is left in place so you can inspect or merge first.
+
+`--worktree` is **not** compatible with `--resume` (resume runs from the existing worktree directly).
 
 ## How to Complete the Task
 

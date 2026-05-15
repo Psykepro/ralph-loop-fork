@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# Resolve plugin root for direct invocation (when CLAUDE_PLUGIN_ROOT is unset).
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+
 # Parse arguments
 CHECKLIST_FILE=""
 COMMAND=""
@@ -23,6 +26,10 @@ NO_CLEANUP=false
 LOOP_NAME=""
 ON_COMPLETION_CMD=""
 STOP_HOOK_REMINDERS=""
+WORKTREE=false
+WORKTREE_BASE=".worktrees"
+BRANCH_NAME=""
+COPY_PATHS=""
 
 # Parse options and positional arguments
 while [[ $# -gt 0 ]]; do
@@ -50,6 +57,12 @@ OPTIONS:
   --on-completion '<cmd>'    Command to execute when loop completes successfully (USE QUOTES)
   --stop-hook-reminders <text|path>  Custom reminders added to stop hook prompts
                              Can be a string or path to .md file
+  --worktree                 Run the loop inside an isolated git worktree
+  --no-worktree              Disable worktree mode (default, documents intent)
+  --worktree-base <dir>      Parent dir for worktrees (default: .worktrees)
+  --branch <name>            Branch name for the worktree (default: ralph/<loop-id>)
+  --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
+                             (space-separated inside a single quoted arg)
   --resume                   Resume from previous fork (internal use)
   --session <n>              Session number (internal use)
   -h, --help                 Show this help message
@@ -69,6 +82,21 @@ EXAMPLES:
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "csrf" --completion-promise 'ALL_COMPLETE'
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --total-budget 10
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --completion-promise 'DONE' --on-completion '/reflect-learn'
+  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree
+  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree --copy-paths "_project/docs docs/specs"
+
+WORKTREE MODE:
+  --worktree creates a git worktree at <worktree-base>/<loop-id> on branch
+  ralph/<loop-id> (override with --branch). The loop and all forked sessions
+  run inside the worktree, leaving the main branch untouched.
+
+  Extra files/dirs not picked up by the default copy set (CLAUDE.md, .claude/,
+  the checklist dir, .env*) can be added with --copy-paths "p1 p2 p3".
+
+  After the loop finishes, merge or discard the branch as a unit:
+    git merge ralph/<loop-id>
+    git worktree remove <worktree-base>/<loop-id>
+    git branch -D ralph/<loop-id>
 
 CHECKLIST VALIDATION:
   - When using --completion-promise, the loop validates checklist completion
@@ -226,6 +254,38 @@ HELP_EOF
       SESSION_NUMBER="$2"
       shift 2
       ;;
+    --worktree)
+      WORKTREE=true
+      shift
+      ;;
+    --no-worktree)
+      WORKTREE=false
+      shift
+      ;;
+    --worktree-base)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --worktree-base requires a directory argument" >&2
+        exit 1
+      fi
+      WORKTREE_BASE="$2"
+      shift 2
+      ;;
+    --branch)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --branch requires a name argument" >&2
+        exit 1
+      fi
+      BRANCH_NAME="$2"
+      shift 2
+      ;;
+    --copy-paths)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --copy-paths requires a space-separated list of paths" >&2
+        exit 1
+      fi
+      COPY_PATHS="$2"
+      shift 2
+      ;;
     *)
       echo "Error: Unknown argument: $1" >&2
       echo "   Positional arguments no longer supported." >&2
@@ -241,6 +301,23 @@ if [[ "$RESUME" != "true" ]] && [[ -z "$CHECKLIST_FILE" ]]; then
   echo "" >&2
   echo "   Example:" >&2
   echo "     /ralph-loop-fork:ralph-loop-fork --checklist path/to/checklist.md" >&2
+  exit 1
+fi
+
+# --worktree and --resume are mutually exclusive: resume reads existing state
+# from .claude/ralph-fork/<id>/ in the current dir; worktree creation is an
+# initial-only operation that moves that state into a fresh tree.
+if [[ "$WORKTREE" == "true" ]] && [[ "$RESUME" == "true" ]]; then
+  echo "Error: --worktree cannot be combined with --resume." >&2
+  echo "   Resume runs from the existing worktree directly." >&2
+  exit 1
+fi
+
+# In worktree mode, claude must be on PATH — we launch it ourselves via tmux
+# and tmux silently exits the inner command on missing-binary failures, so
+# the script would otherwise report success while the session dies.
+if [[ "$WORKTREE" == "true" ]] && ! command -v claude >/dev/null 2>&1; then
+  echo "Error: --worktree requires 'claude' on PATH (it is launched via tmux)." >&2
   exit 1
 fi
 
@@ -273,6 +350,30 @@ if [[ -z "$LOOP_NAME" ]]; then
   LOOP_ID=$(head -c 4 /dev/urandom | xxd -p)
 else
   LOOP_ID="$LOOP_NAME"
+fi
+
+# Default branch name (only used when --worktree is set).
+if [[ -z "$BRANCH_NAME" ]]; then
+  BRANCH_NAME="ralph/$LOOP_ID"
+fi
+
+# Pre-flight checks for worktree mode: in non-worktree mode the duplicate-loop
+# guard below catches a re-run with the same --name. In worktree mode the
+# first run moved state out of the cwd, so that guard misses; surface a
+# clear error here instead of letting `git worktree add` fail half-way.
+if [[ "$WORKTREE" == "true" ]] && [[ "$RESUME" != "true" ]]; then
+  WORKTREE_TARGET="$WORKTREE_BASE/$LOOP_ID"
+  if [[ -e "$WORKTREE_TARGET" ]]; then
+    echo "Error: Worktree path already exists: $WORKTREE_TARGET" >&2
+    echo "   Remove it first: git worktree remove $WORKTREE_TARGET" >&2
+    exit 1
+  fi
+  if git rev-parse --verify "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
+    echo "Error: Branch already exists: $BRANCH_NAME" >&2
+    echo "   Remove it first: git branch -D $BRANCH_NAME" >&2
+    echo "   Or pass --branch <other-name>." >&2
+    exit 1
+  fi
 fi
 
 # Create loop directory structure
@@ -395,7 +496,8 @@ else
   "awaiting_confirmation": false,
   "executing_on_completion": false,
   "spawned_sessions": [],
-  "original_session_name": "$ORIGINAL_SESSION"
+  "original_session_name": "$ORIGINAL_SESSION",
+  "worktree_path": null
 }
 EOF
 
@@ -520,6 +622,103 @@ WARNING: This loop cannot be stopped manually!
     Or cancel: /ralph-loop-fork:cancel-ralph-fork $LOOP_ID
 
 EOF
+
+# Worktree mode: relocate the loop into an isolated git worktree and launch
+# the initial Claude session there via tmux. Non-worktree mode falls through
+# to the existing inline-echo flow below.
+if [[ "$WORKTREE" == "true" ]]; then
+  # Persist the initial prompt so the worktree-launched Claude can read it.
+  printf '%s\n' "$FULL_PROMPT" > "$LOOP_DIR/prompt.txt"
+
+  CHECKLIST_DIR="$(dirname "$CHECKLIST_FILE")"
+  WORKTREE_PATH_REL="$WORKTREE_BASE/$LOOP_ID"
+
+  # Rollback trap: if anything between here and the final launch fails,
+  # undo the worktree, branch, orphaned main-repo state dir, and any tmp
+  # files we left behind. Best-effort — don't depend on a single var being
+  # populated, because setup-worktree.sh may have created the worktree
+  # before failing internally. Cleared after the launch succeeds.
+  WORKTREE_CREATED=""
+  TMP_STATE=""
+  cleanup_on_fail() {
+    local rc=$?
+    [[ $rc -eq 0 ]] && return
+    [[ -n "$TMP_STATE" ]] && rm -f "$TMP_STATE" 2>/dev/null
+    [[ -n "$WORKTREE_PATH_REL" ]] && git worktree remove --force "$WORKTREE_PATH_REL" 2>/dev/null
+    [[ -n "$WORKTREE_CREATED" ]] && [[ "$WORKTREE_CREATED" != "$WORKTREE_PATH_REL" ]] && \
+      git worktree remove --force "$WORKTREE_CREATED" 2>/dev/null
+    [[ -n "$BRANCH_NAME" ]] && git branch -D "$BRANCH_NAME" 2>/dev/null
+    [[ -n "$LOOP_DIR" ]] && rm -rf "$LOOP_DIR" 2>/dev/null
+  }
+  trap cleanup_on_fail EXIT
+
+  # Word-split COPY_PATHS on whitespace intentionally so each entry becomes
+  # a separate arg to setup-worktree.sh.
+  # shellcheck disable=SC2086
+  WORKTREE_PATH_ABS=$("${PLUGIN_ROOT}/scripts/setup-worktree.sh" \
+    "$LOOP_ID" "$WORKTREE_PATH_REL" "$BRANCH_NAME" \
+    "$CHECKLIST_DIR" $COPY_PATHS)
+
+  if [[ -z "$WORKTREE_PATH_ABS" ]]; then
+    echo "Error: setup-worktree.sh returned an empty path." >&2
+    exit 1
+  fi
+  WORKTREE_CREATED="$WORKTREE_PATH_ABS"
+
+  # Move the freshly-created state dir into the worktree. setup-worktree.sh
+  # already cleared any stale copy at the destination.
+  rm -rf "$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID"
+  mv "$LOOP_DIR" "$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID"
+
+  # Record the absolute worktree path inside the moved state.json so cancel
+  # and resume both see it.
+  MOVED_STATE_FILE="$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID/state.json"
+  TMP_STATE="${MOVED_STATE_FILE}.tmp"
+  jq --arg wp "$WORKTREE_PATH_ABS" '.worktree_path = $wp' \
+    "$MOVED_STATE_FILE" > "$TMP_STATE"
+  mv "$TMP_STATE" "$MOVED_STATE_FILE"
+
+  # Launch the initial Claude session inside the worktree.
+  SESSION_NAME="ralph-$LOOP_ID-1"
+  INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
+  FORK_CMD="unset CLAUDECODE; claude --dangerously-skip-permissions '$INIT_MSG'"
+  TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
+
+  # Record the session so cancel-ralph-fork can clean it up.
+  SESSION_ENTRY=$(jq -n \
+    --arg name "$SESSION_NAME" \
+    --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{name: $name, started_at: $started, session_number: 1}')
+  jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
+    "$MOVED_STATE_FILE" > "$TMP_STATE"
+  mv "$TMP_STATE" "$MOVED_STATE_FILE"
+
+  # Auto-accept "Trust this folder" prompt (best-effort, harmless otherwise).
+  (sleep 4 && tmux send-keys -t "$SESSION_NAME" Enter 2>/dev/null) &
+
+  # Success — release the rollback trap so a downstream `exit 0` doesn't
+  # tear the worktree back down.
+  trap - EXIT
+
+  echo ""
+  echo "================================================================="
+  echo " Worktree mode — loop started in isolation"
+  echo "================================================================="
+  echo " Worktree:  $WORKTREE_PATH_ABS"
+  echo " Branch:    $BRANCH_NAME"
+  echo " Session:   $SESSION_NAME"
+  echo ""
+  echo " Attach:    tmux attach -t $SESSION_NAME"
+  echo " Monitor:   tmux capture-pane -t $SESSION_NAME -p -S -50"
+  echo " Cancel:    /ralph-loop-fork:cancel-ralph-fork $LOOP_ID"
+  echo ""
+  echo " When the loop finishes, merge or discard the branch:"
+  echo "   git merge $BRANCH_NAME"
+  echo "   git worktree remove $WORKTREE_PATH_ABS"
+  echo "   git branch -D $BRANCH_NAME"
+  echo "================================================================="
+  exit 0
+fi
 
 # Output the initial prompt with RALPH LOOP CONTEXT
 echo ""
