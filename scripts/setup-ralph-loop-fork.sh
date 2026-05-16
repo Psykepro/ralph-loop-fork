@@ -13,6 +13,19 @@ set -euo pipefail
 # Resolve plugin root for direct invocation (when CLAUDE_PLUGIN_ROOT is unset).
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
+# Print a red bordered error block. Usage: _err "title" ["detail" ...]
+_err() {
+  local msg="$1"; shift
+  echo "" >&2
+  echo -e "\033[1;31m=======================================================================\033[0m" >&2
+  echo -e "\033[1;31m  ERROR: $msg\033[0m" >&2
+  for detail in "$@"; do
+    echo -e "\033[1;31m         $detail\033[0m" >&2
+  done
+  echo -e "\033[1;31m=======================================================================\033[0m" >&2
+  echo "" >&2
+}
+
 # Parse arguments
 CHECKLIST_FILE=""
 COMMAND=""
@@ -122,29 +135,24 @@ HELP_EOF
       ;;
     --name)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --name requires an identifier argument" >&2
+        _err "--name requires an identifier argument"
         exit 1
       fi
       # Sanitize name: lowercase, replace spaces with dashes, remove special chars
       LOOP_NAME=$(echo "$2" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-z0-9-]//g')
       if [[ -z "$LOOP_NAME" ]]; then
-        echo "Error: --name resulted in empty identifier after sanitization" >&2
+        _err "--name resulted in empty identifier after sanitization"
         exit 1
       fi
       shift 2
       ;;
     --checklist)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --checklist requires a file path" >&2
+        _err "--checklist requires a file path"
         exit 1
       fi
       if [[ ! -f "$2" ]]; then
-        echo "" >&2
-        echo -e "\033[1;31m=======================================================================\033[0m" >&2
-        echo -e "\033[1;31m  CHECKLIST FILE NOT FOUND\033[0m" >&2
-        echo -e "\033[1;31m  Path: $2\033[0m" >&2
-        echo -e "\033[1;31m=======================================================================\033[0m" >&2
-        echo "" >&2
+        _err "Checklist file not found" "Path: $2"
         exit 1
       fi
       CHECKLIST_FILE="$2"
@@ -152,7 +160,7 @@ HELP_EOF
       ;;
     --command)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --command requires an argument" >&2
+        _err "--command requires an argument"
         exit 1
       fi
       # Strip leading/trailing quotes if present
@@ -165,11 +173,11 @@ HELP_EOF
       ;;
     --total-budget)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --total-budget requires a number argument" >&2
+        _err "--total-budget requires a number argument"
         exit 1
       fi
       if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-        echo "Error: --total-budget must be a positive integer, got: $2" >&2
+        _err "--total-budget must be a positive integer" "Got: $2"
         exit 1
       fi
       TOTAL_BUDGET="$2"
@@ -177,11 +185,11 @@ HELP_EOF
       ;;
     --max-per-session)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --max-per-session requires a number argument" >&2
+        _err "--max-per-session requires a number argument"
         exit 1
       fi
       if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-        echo "Error: --max-per-session must be a positive integer, got: $2" >&2
+        _err "--max-per-session must be a positive integer" "Got: $2"
         exit 1
       fi
       MAX_PER_SESSION="$2"
@@ -189,7 +197,7 @@ HELP_EOF
       ;;
     --completion-promise)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --completion-promise requires a text argument" >&2
+        _err "--completion-promise requires a text argument"
         exit 1
       fi
       # Strip leading/trailing quotes if present (user might include them accidentally)
@@ -201,7 +209,7 @@ HELP_EOF
       shift 2
       ;;
     --tool)
-      echo "Error: --tool flag has been removed. The plugin now uses 'claude --dangerously-skip-permissions' directly." >&2
+      _err "--tool flag has been removed" "The plugin now uses 'claude --dangerously-skip-permissions' directly."
       exit 1
       ;;
     --preserve-final-session)
@@ -218,7 +226,7 @@ HELP_EOF
       ;;
     --on-completion)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --on-completion requires a command argument" >&2
+        _err "--on-completion requires a command argument"
         exit 1
       fi
       # Strip leading/trailing quotes if present
@@ -231,7 +239,7 @@ HELP_EOF
       ;;
     --stop-hook-reminders)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --stop-hook-reminders requires a text or file path argument" >&2
+        _err "--stop-hook-reminders requires a text or file path argument"
         exit 1
       fi
       # Strip leading/trailing quotes if present
@@ -253,7 +261,7 @@ HELP_EOF
       ;;
     --session)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --session requires a number argument" >&2
+        _err "--session requires a number argument"
         exit 1
       fi
       SESSION_NUMBER="$2"
@@ -269,7 +277,7 @@ HELP_EOF
       ;;
     --worktree-base)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --worktree-base requires a directory argument" >&2
+        _err "--worktree-base requires a directory argument"
         exit 1
       fi
       WORKTREE_BASE="$2"
@@ -277,7 +285,7 @@ HELP_EOF
       ;;
     --branch)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --branch requires a name argument" >&2
+        _err "--branch requires a name argument"
         exit 1
       fi
       BRANCH_NAME="$2"
@@ -285,16 +293,14 @@ HELP_EOF
       ;;
     --copy-paths)
       if [[ -z "${2:-}" ]]; then
-        echo "Error: --copy-paths requires a space-separated list of paths" >&2
+        _err "--copy-paths requires a space-separated list of paths"
         exit 1
       fi
       COPY_PATHS="$2"
       shift 2
       ;;
     *)
-      echo "Error: Unknown argument: $1" >&2
-      echo "   Positional arguments no longer supported." >&2
-      echo "   Use: --checklist <path> [--command <cmd>]" >&2
+      _err "Unknown argument: $1" "Positional arguments no longer supported." "Use: --checklist <path> [--command <cmd>]"
       exit 1
       ;;
   esac
@@ -302,10 +308,7 @@ done
 
 # Validate required --checklist argument (unless resuming)
 if [[ "$RESUME" != "true" ]] && [[ -z "$CHECKLIST_FILE" ]]; then
-  echo "Error: --checklist is required" >&2
-  echo "" >&2
-  echo "   Example:" >&2
-  echo "     /ralph-loop-fork:ralph-loop-fork --checklist path/to/checklist.md" >&2
+  _err "--checklist is required" "Example: /ralph-loop-fork:ralph-loop-fork --checklist path/to/checklist.md"
   exit 1
 fi
 
@@ -313,8 +316,7 @@ fi
 # from .claude/ralph-fork/<id>/ in the current dir; worktree creation is an
 # initial-only operation that moves that state into a fresh tree.
 if [[ "$WORKTREE" == "true" ]] && [[ "$RESUME" == "true" ]]; then
-  echo "Error: --worktree cannot be combined with --resume." >&2
-  echo "   Resume runs from the existing worktree directly." >&2
+  _err "--worktree cannot be combined with --resume" "Resume runs from the existing worktree directly."
   exit 1
 fi
 
@@ -322,7 +324,7 @@ fi
 # and tmux silently exits the inner command on missing-binary failures, so
 # the script would otherwise report success while the session dies.
 if [[ "$WORKTREE" == "true" ]] && ! command -v claude >/dev/null 2>&1; then
-  echo "Error: --worktree requires 'claude' on PATH (it is launched via tmux)." >&2
+  _err "--worktree requires 'claude' on PATH" "It is launched via tmux — ensure 'claude' is available in your shell."
   exit 1
 fi
 
@@ -335,17 +337,19 @@ fi
 
 # Check dependencies
 if ! command -v jq &> /dev/null; then
-  echo "Error: jq is required but was not found." >&2
-  echo "   Install it via your package manager (apt/brew/pacman/...)." >&2
+  _err "jq is required but was not found" "Install it via your package manager (apt/brew/pacman/...)."
   exit 1
 fi
 
 if ! command -v tmux &> /dev/null; then
-  echo "Error: tmux is required but was not found." >&2
-  echo "   Install it via your package manager (apt/brew/pacman/...)." >&2
   # Best-effort Windows guidance (Git Bash / MSYS2 do not ship tmux)
   if [[ -n "${MSYSTEM:-}" ]] || [[ "$(uname -s 2>/dev/null)" == MINGW* ]] || [[ "$(uname -s 2>/dev/null)" == MSYS* ]]; then
-    echo "   On Windows: tmux does not run on native Windows / Git Bash. Install WSL2 and run this from inside WSL." >&2
+    _err "tmux is required but was not found" \
+      "Install it via your package manager (apt/brew/pacman/...)." \
+      "On Windows: tmux does not run on native Windows / Git Bash." \
+      "Install WSL2 and run this from inside WSL."
+  else
+    _err "tmux is required but was not found" "Install it via your package manager (apt/brew/pacman/...)."
   fi
   exit 1
 fi
@@ -369,14 +373,11 @@ fi
 if [[ "$WORKTREE" == "true" ]] && [[ "$RESUME" != "true" ]]; then
   WORKTREE_TARGET="$WORKTREE_BASE/$LOOP_ID"
   if [[ -e "$WORKTREE_TARGET" ]]; then
-    echo "Error: Worktree path already exists: $WORKTREE_TARGET" >&2
-    echo "   Remove it first: git worktree remove $WORKTREE_TARGET" >&2
+    _err "Worktree path already exists: $WORKTREE_TARGET" "Remove it first: git worktree remove $WORKTREE_TARGET"
     exit 1
   fi
   if git rev-parse --verify "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
-    echo "Error: Branch already exists: $BRANCH_NAME" >&2
-    echo "   Remove it first: git branch -D $BRANCH_NAME" >&2
-    echo "   Or pass --branch <other-name>." >&2
+    _err "Branch already exists: $BRANCH_NAME" "Remove it first: git branch -D $BRANCH_NAME" "Or pass --branch <other-name>."
     exit 1
   fi
 fi
@@ -393,7 +394,7 @@ PROMPT_FILE="$LOOP_DIR/prompt.txt"
 # Handle resume from forked session
 if [[ "$RESUME" == "true" ]]; then
   if [[ ! -f "$STATE_FILE" ]]; then
-    echo "Error: Cannot resume - no state file found at $STATE_FILE" >&2
+    _err "Cannot resume — no state file found" "Expected: $STATE_FILE"
     exit 1
   fi
 
@@ -422,9 +423,7 @@ else
   if [[ -f "$STATE_FILE" ]]; then
     EXISTING_ACTIVE=$(jq -r '.active' "$STATE_FILE" 2>/dev/null || echo "false")
     if [[ "$EXISTING_ACTIVE" == "true" ]]; then
-      echo "Error: Loop '$LOOP_ID' already exists and is active" >&2
-      echo "   To cancel it: /ralph-loop-fork:cancel-ralph-fork $LOOP_ID" >&2
-      echo "   Or use a different --name" >&2
+      _err "Loop '$LOOP_ID' already exists and is active" "To cancel it: /ralph-loop-fork:cancel-ralph-fork $LOOP_ID" "Or use a different --name."
       exit 1
     fi
   fi
@@ -665,7 +664,7 @@ if [[ "$WORKTREE" == "true" ]]; then
     "$CHECKLIST_DIR" $COPY_PATHS)
 
   if [[ -z "$WORKTREE_PATH_ABS" ]]; then
-    echo "Error: setup-worktree.sh returned an empty path." >&2
+    _err "setup-worktree.sh returned an empty path"
     exit 1
   fi
   WORKTREE_CREATED="$WORKTREE_PATH_ABS"
