@@ -139,7 +139,12 @@ HELP_EOF
         exit 1
       fi
       if [[ ! -f "$2" ]]; then
-        echo "Error: Checklist file not found: $2" >&2
+        echo "" >&2
+        echo -e "\033[1;31m=======================================================================\033[0m" >&2
+        echo -e "\033[1;31m  CHECKLIST FILE NOT FOUND\033[0m" >&2
+        echo -e "\033[1;31m  Path: $2\033[0m" >&2
+        echo -e "\033[1;31m=======================================================================\033[0m" >&2
+        echo "" >&2
         exit 1
       fi
       CHECKLIST_FILE="$2"
