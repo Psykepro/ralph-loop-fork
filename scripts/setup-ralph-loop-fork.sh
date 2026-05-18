@@ -560,8 +560,9 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 PARALLEL SUB-AGENTS (CRITICAL RULE):
 - NEVER use Agent with run_in_background=true inside this session.
   Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
-  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
+  message. The harness runs them concurrently and waits for ALL to finish before continuing.
+  You get full parallelism without losing results across session boundaries.
 - Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):
@@ -591,8 +592,9 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 PARALLEL SUB-AGENTS (CRITICAL RULE):
 - NEVER use Agent with run_in_background=true inside this session.
   Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
-  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
+  message. The harness runs them concurrently and waits for ALL to finish before continuing.
+  You get full parallelism without losing results across session boundaries.
 - Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):

@@ -267,26 +267,26 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 7: Max retries (count=4) → gives up, falls through (no bg-agent block)"
+section "Test 7: High wait count (e.g. 10) with agents still pending → still re-blocks (no cap)"
 LOOP="test-bg-7"
-make_state "$LOOP" true 4
+make_state "$LOOP" true 10
 make_local "$LOOP"
 T=$(mktemp "$TEST_DIR/t7.XXXXXX.jsonl")
-make_transcript "$T" "$LOOP" 2 0 "Still waiting but count maxed"
+make_transcript "$T" "$LOOP" 4 0 "Still waiting, no cap"
 
 OUTPUT=$(run_hook "$LOOP" "$T" true)
 REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null || echo "")
-if echo "$REASON" | grep -qi "background.*still\|background.*pending"; then
-  fail "Should not re-block when max retries (4/5→5) exceeded: $REASON"
+if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1 && echo "$REASON" | grep -qi "background"; then
+  pass "Correctly re-blocks even at high wait count (no cap) — waits for all agents"
 else
-  pass "Does not re-block at max retries — falls through to normal flow"
+  fail "Expected continued re-block at high wait count, got: $OUTPUT"
 fi
 
 STATE=$(cat "$TEST_DIR/.claude/ralph-fork/$LOOP/state.json")
-if echo "$STATE" | jq -e '.awaiting_background_agents == false' >/dev/null 2>&1; then
-  pass "awaiting_background_agents cleared on timeout"
+if echo "$STATE" | jq -e '.bg_agent_block_count == 11' >/dev/null 2>&1; then
+  pass "bg_agent_block_count incremented to 11 (unbounded counter)"
 else
-  fail "awaiting_background_agents not cleared on timeout"
+  fail "bg_agent_block_count not incremented correctly: $(echo "$STATE" | jq '.bg_agent_block_count')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

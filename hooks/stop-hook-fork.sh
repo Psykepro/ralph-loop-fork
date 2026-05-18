@@ -779,10 +779,6 @@ EXECUTING_ON_COMPLETION=$(jq -r '.executing_on_completion // false' "$STATE_FILE
 AWAITING_BACKGROUND_AGENTS=$(jq -r '.awaiting_background_agents // false' "$STATE_FILE" 2>/dev/null) || AWAITING_BACKGROUND_AGENTS="false"
 BG_AGENT_BLOCK_COUNT=$(jq -r '.bg_agent_block_count // 0' "$STATE_FILE" 2>/dev/null) || BG_AGENT_BLOCK_COUNT=0
 
-# In-memory flag: set to true when max bg-agent waits exceeded so normal flow
-# skips re-detection and avoids an infinite block loop
-SKIP_BG_DETECTION=false
-
 # Parse local state
 FRONTMATTER=$(awk '/^---$/{i++; next} i==1' "$LOCAL_FILE") || true
 LOCAL_ITERATION=$(echo "$FRONTMATTER" | grep '^iteration:' | sed 's/iteration: *//' || echo "")
@@ -856,33 +852,26 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
 
     exit 0
   elif [[ "$AWAITING_BACKGROUND_AGENTS" == "true" ]]; then
-    # We previously blocked waiting for background agents — re-check if they're done
+    # We previously blocked waiting for background agents — re-check if they're done.
+    # No cap: keep blocking until every started agent delivers its result.
     debug_log "CONTINUATION: awaiting_background_agents=true - re-checking"
     PENDING_BG_CONT=$(count_pending_background_agents "$TRANSCRIPT_PATH")
     if [[ $PENDING_BG_CONT -gt 0 ]]; then
       NEW_BG_COUNT=$((BG_AGENT_BLOCK_COUNT + 1))
-      if [[ $NEW_BG_COUNT -ge 5 ]]; then
-        info "Ralph Loop Fork [$LOOP_ID]: Background agents timed out after 5 waits — proceeding without all results"
-        update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
-        SKIP_BG_DETECTION=true
-        debug_log "BG AGENTS: Max wait exceeded — falling through to normal flow"
-        # Fall through (don't exit) so normal flow handles fork/promise
-      else
-        update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
-        debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (attempt $NEW_BG_COUNT/5)"
-        info "Ralph Loop Fork [$LOOP_ID]: $PENDING_BG_CONT background agent(s) still running (wait $NEW_BG_COUNT/5)..."
-        info ""
-        jq -n \
-          --argjson n "$PENDING_BG_CONT" \
-          --argjson attempt "$NEW_BG_COUNT" \
-          --arg loopid "$LOOP_ID" \
-          '{
-            "decision": "block",
-            "reason": ("Ralph Loop [\($loopid)]: \($n) background sub-agent(s) still running (wait \($attempt)/5). Do NOT update the checklist or output the completion promise yet. Wait until ALL task-notification messages have been received, then integrate all results."),
-            "systemMessage": ("Ralph [\($loopid)]: \($n) background agents still pending")
-          }'
-        exit 0
-      fi
+      update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
+      debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (wait #$NEW_BG_COUNT)"
+      info "Ralph Loop Fork [$LOOP_ID]: $PENDING_BG_CONT background agent(s) still running (wait #$NEW_BG_COUNT)..."
+      info ""
+      jq -n \
+        --argjson n "$PENDING_BG_CONT" \
+        --argjson attempt "$NEW_BG_COUNT" \
+        --arg loopid "$LOOP_ID" \
+        '{
+          "decision": "block",
+          "reason": ("Ralph Loop [\($loopid)]: \($n) background sub-agent(s) still running (wait #\($attempt)). Do NOT update the checklist or output the completion promise yet. Wait until ALL task-notification messages have been received, then integrate all results."),
+          "systemMessage": ("Ralph [\($loopid)]: \($n) background agents still pending")
+        }'
+      exit 0
     else
       debug_log "BG AGENTS: All resolved in continuation cycle — resuming normal flow"
       update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
@@ -958,26 +947,25 @@ fi
 
 # ============================================================================
 # BACKGROUND AGENT DETECTION (RUNNING STATE)
-# Block instead of forking when background agents haven't delivered results yet.
-# SKIP_BG_DETECTION is set when the continuation cycle gave up after 5 waits.
+# Block instead of forking until every launched background agent has delivered
+# its task-notification result. No cap — waits for all agents regardless of
+# how many were started.
 # ============================================================================
-if [[ "$SKIP_BG_DETECTION" != "true" ]]; then
-  BG_PENDING=$(count_pending_background_agents "$TRANSCRIPT_PATH")
-  if [[ $BG_PENDING -gt 0 ]]; then
-    debug_log "RUNNING: $BG_PENDING pending background agents detected — BLOCKING"
-    info "Ralph Loop Fork [$LOOP_ID]: $BG_PENDING background agent(s) still running — waiting for results..."
-    info ""
-    update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
-    jq -n \
-      --argjson n "$BG_PENDING" \
-      --arg loopid "$LOOP_ID" \
-      '{
-        "decision": "block",
-        "reason": ("Ralph Loop [\($loopid)]: You have \($n) background sub-agent(s) whose results have NOT been received yet. Do NOT update the checklist or output the completion promise. Wait for all task-notification messages, then collect and integrate all results before continuing."),
-        "systemMessage": ("Ralph [\($loopid)]: \($n) background agents pending — wait for completion")
-      }'
-    exit 0
-  fi
+BG_PENDING=$(count_pending_background_agents "$TRANSCRIPT_PATH")
+if [[ $BG_PENDING -gt 0 ]]; then
+  debug_log "RUNNING: $BG_PENDING pending background agents detected — BLOCKING"
+  info "Ralph Loop Fork [$LOOP_ID]: $BG_PENDING background agent(s) still running — waiting for results..."
+  info ""
+  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
+  jq -n \
+    --argjson n "$BG_PENDING" \
+    --arg loopid "$LOOP_ID" \
+    '{
+      "decision": "block",
+      "reason": ("Ralph Loop [\($loopid)]: You have \($n) background sub-agent(s) whose results have NOT been received yet. Do NOT update the checklist or output the completion promise. Wait for all task-notification messages, then collect and integrate all results before continuing."),
+      "systemMessage": ("Ralph [\($loopid)]: \($n) background agents pending — wait for completion")
+    }'
+  exit 0
 fi
 
 # ============================================================================
