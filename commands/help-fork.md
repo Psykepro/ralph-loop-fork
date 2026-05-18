@@ -75,6 +75,19 @@ When using `--completion-promise`, the loop validates that all checklist items a
 
 ---
 
+### /ralph-loop-fork:init-ralph-fork [--check-only]
+
+Check and auto-install all dependencies.
+
+```
+/ralph-loop-fork:init-ralph-fork              # check + auto-install
+/ralph-loop-fork:init-ralph-fork --check-only # report only, no install
+```
+
+Run this once after installing the plugin. If a subsequent `ralph-loop-fork` run fails with a missing-dependency error, run this first to fix it.
+
+---
+
 ### /ralph-loop-fork:cancel-ralph-fork [LOOP_ID | --list | --all]
 
 Manage active Ralph Loop Fork sessions.
@@ -318,9 +331,16 @@ tmux ls | grep ralph
 
 ## Dependencies
 
-- `tmux`: Terminal multiplexer (install via `apt install tmux`, `brew install tmux`, `pacman -S tmux`, ...)
-- `jq`: JSON parsing (install via `apt install jq`, `brew install jq`, `pacman -S jq`, ...)
-- `md5sum` or `md5`: Checksum (Linux ships `md5sum`; macOS ships `md5 -q`; either works)
+Run `/ralph-loop-fork:init-ralph-fork` to check and auto-install all dependencies.
+
+| Dependency | Required | Notes |
+|---|---|---|
+| `jq` | Always | JSON state |
+| `tmux` | Always | Session forking |
+| `xxd` | Always | Loop ID generation |
+| `git ≥ 2.5` | `--worktree` only | Worktree subcommand |
+| `claude` CLI | `--worktree` only | Launched inside worktree |
+| `uuidgen` | Optional | Falls back to `/dev/urandom` |
 
 On Windows: tmux does not run on native Windows / Git Bash. Install WSL2 and
 run this plugin from inside WSL.
@@ -337,8 +357,8 @@ run this plugin from inside WSL.
 
 | Issue | Solution |
 |-------|----------|
-| `tmux is required but was not found` | Install via your package manager (`apt install tmux`, `brew install tmux`, ...). On Windows install WSL2. |
-| `jq is required but was not found` | Install via your package manager (`apt install jq`, `brew install jq`, ...). |
+| `tmux is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. On Windows install WSL2. |
+| `jq is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. |
 | Fork not spawning | Check tmux is running: `tmux ls` |
 | Session exists error | Previous run left sessions; `tmux kill-session -t ralph-ID-N` |
 | No progress detected | Ensure you're modifying the checklist file |
