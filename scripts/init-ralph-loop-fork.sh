@@ -42,6 +42,7 @@ IS_MAC=false
 IS_APT=false
 IS_PACMAN=false
 IS_BREW=false
+APT_UPDATED=false
 
 [[ "$OS" == "Darwin" ]] && IS_MAC=true
 command -v brew    >/dev/null 2>&1 && IS_BREW=true
@@ -52,6 +53,9 @@ IS_WINDOWS=false
 if [[ -n "${MSYSTEM:-}" ]] || [[ "$OS" == MINGW* ]] || [[ "$OS" == MSYS* ]]; then
   IS_WINDOWS=true
 fi
+
+# Use sudo only when not already root.
+_sudo() { [[ "$(id -u)" -eq 0 ]] && "$@" || sudo "$@"; }
 
 # ---------------------------------------------------------------------------
 # Install helper — tries the right package manager for this platform
@@ -75,13 +79,18 @@ try_install() {
   fi
 
   if $IS_APT; then
-    info "Running: sudo apt-get install -y $pkg"
-    sudo apt-get install -y "$pkg" >/dev/null 2>&1 && command -v "$binary" >/dev/null 2>&1 && return 0
+    if ! $APT_UPDATED; then
+      info "Running: apt-get update"
+      _sudo apt-get update -qq >/dev/null 2>&1
+      APT_UPDATED=true
+    fi
+    info "Running: apt-get install -y $pkg"
+    _sudo apt-get install -y "$pkg" >/dev/null 2>&1 && command -v "$binary" >/dev/null 2>&1 && return 0
   fi
 
   if $IS_PACMAN; then
-    info "Running: sudo pacman -S --noconfirm $pkg"
-    sudo pacman -S --noconfirm "$pkg" >/dev/null 2>&1 && command -v "$binary" >/dev/null 2>&1 && return 0
+    info "Running: pacman -S --noconfirm $pkg"
+    _sudo pacman -S --noconfirm "$pkg" >/dev/null 2>&1 && command -v "$binary" >/dev/null 2>&1 && return 0
   fi
 
   return 1
@@ -174,8 +183,6 @@ check_claude() {
     warn "claude CLI — not found"
     info "Required only for --worktree mode."
     info "Install: https://claude.ai/code"
-    WARN=$((WARN+1))
-    PASS=$((PASS-1))  # undo the warn() increment duplication
   fi
 }
 
