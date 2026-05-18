@@ -31,10 +31,16 @@ each fully isolated.
 ```
 
 The commands become available as `/ralph-loop-fork:ralph-loop-fork`,
-`/ralph-loop-fork:cancel-ralph-fork`, and `/ralph-loop-fork:help-fork`.
+`/ralph-loop-fork:cancel-ralph-fork`, `/ralph-loop-fork:help-fork`, and
+`/ralph-loop-fork:init-ralph-fork`.
 
 > **Scope**: installs at user scope by default (available in all projects).
 > Pass `--scope project` to scope it to a single repository.
+
+```
+# 4. Check and install dependencies
+/ralph-loop-fork:init-ralph-fork
+```
 
 ### Manual install
 
@@ -43,36 +49,55 @@ git clone https://github.com/Psykepro/ralph-loop-fork \
   ~/.claude/plugins/marketplaces/local/ralph-loop-fork
 ```
 
-Restart Claude Code — plugins are discovered at startup.
+Restart Claude Code — plugins are discovered at startup. Then run:
+
+```
+/ralph-loop-fork:init-ralph-fork
+```
 
 ---
 
 ## Dependencies
 
-- `tmux` — terminal multiplexer
-- `jq` — JSON parsing
-- `bash` 4+ — included on macOS/Linux/WSL
+| Dependency | Required | Notes |
+|---|---|---|
+| `jq` | Always | JSON state management |
+| `tmux` | Always | Session forking |
+| `xxd` | Always | Loop ID generation |
+| `git ≥ 2.5` | `--worktree` only | Worktree subcommand |
+| `claude` CLI | `--worktree` only | Launched inside the worktree |
+| `uuidgen` | Optional | Falls back to `/dev/urandom` |
+
+### Quick setup
+
+After installing the plugin, run the built-in init command to check and auto-install all dependencies:
+
+```
+/ralph-loop-fork:init-ralph-fork
+```
+
+It supports Homebrew (macOS), apt-get (Debian/Ubuntu), and pacman (Arch). Use `--check-only` to report status without installing anything.
+
+Manual install if you prefer:
 
 ```bash
 # macOS
 brew install tmux jq
 
 # Debian / Ubuntu
-sudo apt install tmux jq
+sudo apt install tmux jq xxd
 
 # Arch
-sudo pacman -S tmux jq
+sudo pacman -S tmux jq vim   # xxd is part of vim on Arch
 ```
 
-For the checklist-progress hash the script uses `md5sum` (Linux), falling back
-to `md5 -q` (macOS) or `shasum` — no extra install needed on a standard system.
+For checklist-progress hashing the script tries `md5sum` → `md5 -q` → `shasum` — no extra install on a standard system.
 
 ## Portability
 
 Targets macOS, Linux, and Windows under **WSL2**. tmux does not run on native
-Windows / Git Bash; if you are on Windows install WSL2 and run from inside WSL.
-The scripts detect Git Bash / MSYS2 and print a pointer to that effect if tmux
-is missing.
+Windows / Git Bash; install WSL2 and run from inside WSL. The init command
+detects this and prints guidance.
 
 ---
 
@@ -420,8 +445,8 @@ tail -f "${RALPH_FORK_LOG_DIR:-/tmp/ralph-fork-logs}/ralph-fork-$(date +%Y-%m-%d
 | Issue | Solution |
 |-------|----------|
 | Commands not recognized after install | Run `/reload-plugins` — no restart needed |
-| `tmux is required but was not found` | Install via your package manager. On Windows: install WSL2 and run from inside WSL. |
-| `jq is required but was not found` | Install via your package manager (`apt install jq`, `brew install jq`, etc.) |
+| `tmux is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. On Windows: install WSL2 and run from inside WSL. |
+| `jq is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. |
 | Fork not spawning | Verify tmux: `tmux -V` |
 | Session already exists error | Remove stale session: `tmux kill-session -t ralph-LOOP_ID-N` |
 | State corrupted | Cancel and restart: `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` |

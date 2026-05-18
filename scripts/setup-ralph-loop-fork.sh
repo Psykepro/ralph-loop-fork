@@ -324,7 +324,9 @@ fi
 # and tmux silently exits the inner command on missing-binary failures, so
 # the script would otherwise report success while the session dies.
 if [[ "$WORKTREE" == "true" ]] && ! command -v claude >/dev/null 2>&1; then
-  _err "--worktree requires 'claude' on PATH" "It is launched via tmux — ensure 'claude' is available in your shell."
+  _err "--worktree requires 'claude' on PATH" \
+    "It is launched via tmux — ensure 'claude' is available in your shell." \
+    "Run /ralph-loop-fork:init-ralph-fork --check-only to verify all dependencies."
   exit 1
 fi
 
@@ -337,19 +339,19 @@ fi
 
 # Check dependencies
 if ! command -v jq &> /dev/null; then
-  _err "jq is required but was not found" "Install it via your package manager (apt/brew/pacman/...)."
+  _err "jq is required but was not found" \
+    "Run /ralph-loop-fork:init-ralph-fork to auto-install all dependencies."
   exit 1
 fi
 
 if ! command -v tmux &> /dev/null; then
-  # Best-effort Windows guidance (Git Bash / MSYS2 do not ship tmux)
   if [[ -n "${MSYSTEM:-}" ]] || [[ "$(uname -s 2>/dev/null)" == MINGW* ]] || [[ "$(uname -s 2>/dev/null)" == MSYS* ]]; then
     _err "tmux is required but was not found" \
-      "Install it via your package manager (apt/brew/pacman/...)." \
       "On Windows: tmux does not run on native Windows / Git Bash." \
       "Install WSL2 and run this from inside WSL."
   else
-    _err "tmux is required but was not found" "Install it via your package manager (apt/brew/pacman/...)."
+    _err "tmux is required but was not found" \
+      "Run /ralph-loop-fork:init-ralph-fork to auto-install all dependencies."
   fi
   exit 1
 fi
