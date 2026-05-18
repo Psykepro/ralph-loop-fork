@@ -478,6 +478,8 @@ else
   # - awaiting_checklist_update: LLM should update checklist, then hook spawns new session
   # - awaiting_confirmation: LLM confirmed promise, hook verifies boxes then triggers on-completion
   # - executing_on_completion: On-completion slash command was sent, next hook cleans up and exits
+  # - awaiting_background_agents: BLOCKed waiting for background Agent results to arrive
+  # - bg_agent_block_count: consecutive BLOCK cycles spent waiting for background agents
   cat > "$STATE_FILE" <<EOF
 {
   "loop_id": "$LOOP_ID",
@@ -501,6 +503,8 @@ else
   "awaiting_checklist_update": false,
   "awaiting_confirmation": false,
   "executing_on_completion": false,
+  "awaiting_background_agents": false,
+  "bg_agent_block_count": 0,
   "spawned_sessions": [],
   "original_session_name": "$ORIGINAL_SESSION",
   "worktree_path": null
@@ -553,6 +557,13 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
+PARALLEL SUB-AGENTS (CRITICAL RULE):
+- NEVER use Agent with run_in_background=true inside this session.
+  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
+  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Do NOT end your turn until every sub-agent result has been received and integrated.
+
 BEFORE EXITING (MANDATORY):
 
 CRITICAL RULES FOR CHECKLIST UPDATES:
@@ -576,6 +587,13 @@ else
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
 - This is session 1. Work through the checklist until complete.
+
+PARALLEL SUB-AGENTS (CRITICAL RULE):
+- NEVER use Agent with run_in_background=true inside this session.
+  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
+  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):
 

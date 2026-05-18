@@ -140,6 +140,13 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
+PARALLEL SUB-AGENTS (CRITICAL RULE):
+- NEVER use Agent with run_in_background=true inside this session.
+  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
+  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Do NOT end your turn until every sub-agent result has been received and integrated.
+
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x]
 2. Add a session notes section at the bottom:
@@ -155,6 +162,13 @@ else
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
 - This is a continuation session. Work through the checklist until complete.
+
+PARALLEL SUB-AGENTS (CRITICAL RULE):
+- NEVER use Agent with run_in_background=true inside this session.
+  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+- For parallel research: send multiple Agent calls WITHOUT run_in_background in ONE message.
+  They execute concurrently; Claude waits for ALL results before the turn ends.
+- Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x]
