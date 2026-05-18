@@ -547,6 +547,54 @@ detect_api_error() {
 }
 
 # ============================================================================
+# BACKGROUND AGENT DETECTION
+# Returns count of background Agent calls with no matching task-notification.
+# Transcript format verified against real JSONL: tool_use has
+#   .input.run_in_background == true (JSON boolean, snake_case)
+# Completions appear as queue-operation lines containing
+#   <task-notification>...<tool-use-id>toolu_xxx</tool-use-id>
+# ============================================================================
+count_pending_background_agents() {
+  local transcript="$1"
+
+  [[ ! -f "$transcript" ]] && echo "0" && return 0
+
+  # Collect IDs of background Agent tool_use calls from assistant messages
+  local bg_ids
+  bg_ids=$(grep '"role":"assistant"' "$transcript" 2>/dev/null | \
+    jq -r '
+      .message.content[]? |
+      select(
+        .type == "tool_use" and
+        .name == "Agent" and
+        (.input.run_in_background == true)
+      ) |
+      .id
+    ' 2>/dev/null | sort -u) || bg_ids=""
+
+  [[ -z "$bg_ids" ]] && echo "0" && return 0
+
+  # Collect tool-use IDs from task-notification completion entries
+  local done_ids
+  done_ids=$(grep 'task-notification' "$transcript" 2>/dev/null | \
+    grep -oE '<tool-use-id>[^<]+</tool-use-id>' | \
+    sed 's|<tool-use-id>||;s|</tool-use-id>||' | \
+    sort -u) || done_ids=""
+
+  # Count pending (bg_ids not in done_ids)
+  local pending=0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    if ! printf '%s\n' "$done_ids" | grep -qxF "$id"; then
+      pending=$((pending + 1))
+      debug_log "BG AGENT PENDING: $id"
+    fi
+  done <<< "$bg_ids"
+
+  echo "$pending"
+}
+
+# ============================================================================
 # TRANSCRIPT-BASED LOOP ID EXTRACTION
 # ============================================================================
 extract_loop_from_transcript() {
@@ -728,6 +776,12 @@ STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE" 2>/dev/nu
 AWAITING_CHECKLIST_UPDATE=$(jq -r '.awaiting_checklist_update // false' "$STATE_FILE" 2>/dev/null) || AWAITING_CHECKLIST_UPDATE="false"
 AWAITING_CONFIRMATION=$(jq -r '.awaiting_confirmation // false' "$STATE_FILE" 2>/dev/null) || AWAITING_CONFIRMATION="false"
 EXECUTING_ON_COMPLETION=$(jq -r '.executing_on_completion // false' "$STATE_FILE" 2>/dev/null) || EXECUTING_ON_COMPLETION="false"
+AWAITING_BACKGROUND_AGENTS=$(jq -r '.awaiting_background_agents // false' "$STATE_FILE" 2>/dev/null) || AWAITING_BACKGROUND_AGENTS="false"
+BG_AGENT_BLOCK_COUNT=$(jq -r '.bg_agent_block_count // 0' "$STATE_FILE" 2>/dev/null) || BG_AGENT_BLOCK_COUNT=0
+
+# In-memory flag: set to true when max bg-agent waits exceeded so normal flow
+# skips re-detection and avoids an infinite block loop
+SKIP_BG_DETECTION=false
 
 # Parse local state
 FRONTMATTER=$(awk '/^---$/{i++; next} i==1' "$LOCAL_FILE") || true
@@ -737,7 +791,7 @@ SESSION_NUMBER=$(echo "$FRONTMATTER" | grep '^session_number:' | sed 's/session_
 COMPLETION_PROMISE=$(echo "$FRONTMATTER" | grep '^completion_promise:' | sed 's/completion_promise: *//' | sed 's/^"\(.*\)"$/\1/' || echo "")
 
 debug_log "State: budget=$TOTAL_BUDGET, iterations=$TOTAL_ITERATIONS, session=$SESSION_NUMBER"
-debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION"
+debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION, awaiting_background_agents=$AWAITING_BACKGROUND_AGENTS, bg_agent_block_count=$BG_AGENT_BLOCK_COUNT"
 
 # ============================================================================
 # HANDLE stop_hook_active=true (CONTINUATION CYCLE)
@@ -801,6 +855,41 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     debug_log "Detached cleanup spawned, exiting hook"
 
     exit 0
+  elif [[ "$AWAITING_BACKGROUND_AGENTS" == "true" ]]; then
+    # We previously blocked waiting for background agents — re-check if they're done
+    debug_log "CONTINUATION: awaiting_background_agents=true - re-checking"
+    PENDING_BG_CONT=$(count_pending_background_agents "$TRANSCRIPT_PATH")
+    if [[ $PENDING_BG_CONT -gt 0 ]]; then
+      NEW_BG_COUNT=$((BG_AGENT_BLOCK_COUNT + 1))
+      if [[ $NEW_BG_COUNT -ge 5 ]]; then
+        info "Ralph Loop Fork [$LOOP_ID]: Background agents timed out after 5 waits — proceeding without all results"
+        update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
+        SKIP_BG_DETECTION=true
+        debug_log "BG AGENTS: Max wait exceeded — falling through to normal flow"
+        # Fall through (don't exit) so normal flow handles fork/promise
+      else
+        update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
+        debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (attempt $NEW_BG_COUNT/5)"
+        info "Ralph Loop Fork [$LOOP_ID]: $PENDING_BG_CONT background agent(s) still running (wait $NEW_BG_COUNT/5)..."
+        info ""
+        jq -n \
+          --argjson n "$PENDING_BG_CONT" \
+          --argjson attempt "$NEW_BG_COUNT" \
+          --arg loopid "$LOOP_ID" \
+          '{
+            "decision": "block",
+            "reason": ("Ralph Loop [\($loopid)]: \($n) background sub-agent(s) still running (wait \($attempt)/5). Do NOT update the checklist or output the completion promise yet. Wait until ALL task-notification messages have been received, then integrate all results."),
+            "systemMessage": ("Ralph [\($loopid)]: \($n) background agents still pending")
+          }'
+        exit 0
+      fi
+    else
+      debug_log "BG AGENTS: All resolved in continuation cycle — resuming normal flow"
+      update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
+      info "Ralph Loop Fork [$LOOP_ID]: All background agents completed — resuming..."
+      info ""
+      # Fall through to normal flow (don't exit)
+    fi
   else
     # Other states in continuation cycle - just exit cleanly
     debug_log "CONTINUATION: No special state - exiting cleanly"
@@ -865,6 +954,30 @@ if detect_api_error "$TRANSCRIPT_PATH"; then
   info "Ralph Loop Fork [$LOOP_ID]: API error detected - NOT forking to prevent infinite loop"
   info "   Check the error message above and retry when the issue is resolved."
   exit 0
+fi
+
+# ============================================================================
+# BACKGROUND AGENT DETECTION (RUNNING STATE)
+# Block instead of forking when background agents haven't delivered results yet.
+# SKIP_BG_DETECTION is set when the continuation cycle gave up after 5 waits.
+# ============================================================================
+if [[ "$SKIP_BG_DETECTION" != "true" ]]; then
+  BG_PENDING=$(count_pending_background_agents "$TRANSCRIPT_PATH")
+  if [[ $BG_PENDING -gt 0 ]]; then
+    debug_log "RUNNING: $BG_PENDING pending background agents detected — BLOCKING"
+    info "Ralph Loop Fork [$LOOP_ID]: $BG_PENDING background agent(s) still running — waiting for results..."
+    info ""
+    update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
+    jq -n \
+      --argjson n "$BG_PENDING" \
+      --arg loopid "$LOOP_ID" \
+      '{
+        "decision": "block",
+        "reason": ("Ralph Loop [\($loopid)]: You have \($n) background sub-agent(s) whose results have NOT been received yet. Do NOT update the checklist or output the completion promise. Wait for all task-notification messages, then collect and integrate all results before continuing."),
+        "systemMessage": ("Ralph [\($loopid)]: \($n) background agents pending — wait for completion")
+      }'
+    exit 0
+  fi
 fi
 
 # ============================================================================
