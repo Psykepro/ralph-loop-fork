@@ -351,9 +351,14 @@ case "$MODE" in
 
         # Write cancellation state before removing directory
         stuck_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        jq --arg ts "$stuck_now" \
+        if jq --arg ts "$stuck_now" \
           '.active = false | .completed_at = $ts | .termination_reason = "user_cancelled_stuck"' \
-          "$stuck_state_file" > "${stuck_state_file}.tmp" && mv "${stuck_state_file}.tmp" "$stuck_state_file"
+          "$stuck_state_file" > "${stuck_state_file}.tmp" 2>/dev/null; then
+          mv "${stuck_state_file}.tmp" "$stuck_state_file"
+        else
+          rm -f "${stuck_state_file}.tmp"
+          echo "  Warning: failed to write termination state for $loop_id — cancelling anyway" >&2
+        fi
 
         cancel_loop "$loop_id" || true
         cleaned=$((cleaned + 1))

@@ -577,14 +577,164 @@ test_stale_awaiting_background_agents() {
 # Test D (regression): stop_hook_active=true + awaiting_checklist_update=true +
 #   awaiting_background_agents=true → after spawn: bg flags cleared
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Test E: stop_hook_active=false + awaiting_checklist_update=true → flag cleared (stale Case 3)
+# -----------------------------------------------------------------------------
+test_stale_awaiting_checklist_update() {
+  echo -e "${YELLOW}Test E: stale awaiting_checklist_update=true → falls through to RUNNING (not old spawn)${NC}"
+
+  local loop_id="test-stale-acu"
+  local transcript_file=$(setup_test_env "$loop_id" "stale_acu_test")
+
+  # awaiting_checklist_update=true, stop_hook_active=false (default)
+  create_state_file "$loop_id" 100 1 true false false
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Continuing some work without any promise tag"
+
+  local output=$(run_hook "$transcript_file")
+
+  # The stale detector clears the flag and falls through; RUNNING state re-evaluates.
+  # No promise found → RUNNING state sets awaiting_checklist_update=true (that's OK) and issues BLOCK.
+  # Key: output comes from RUNNING state ("SESSION ENDING"), NOT the old handler ("Checklist updated").
+  if echo "$output" | grep -q "Checklist updated, spawning new session"; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: Old direct-spawn handler should NOT fire — stale detector must fall through"
+  else
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: Old direct-spawn path did not fire (stale detector fell through to RUNNING)"
+  fi
+  assert_contains "SESSION ENDING" "$output" "RUNNING state ran after stale-flag clear"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test F: --all-stuck cancels loops with executing_on_completion=true
+# Test G: --all-stuck cancels loops with awaiting_confirmation=true
+# Test H: --all-stuck does NOT cancel loops that are not stuck
+# -----------------------------------------------------------------------------
+CANCEL_SCRIPT="$SCRIPT_DIR/scripts/cancel-ralph-loop-fork.sh"
+
+test_all_stuck_cancels_eoc() {
+  echo -e "${YELLOW}Test F: --all-stuck cancels loop with executing_on_completion=true${NC}"
+
+  # Use isolated tmp dir so accumulated state from earlier tests doesn't interfere
+  local cancel_dir
+  cancel_dir=$(mktemp -d)
+  local loop_id="stuck-eoc-cancel"
+  mkdir -p "$cancel_dir/.claude/ralph-fork/$loop_id"
+  local state_file="$cancel_dir/.claude/ralph-fork/$loop_id/state.json"
+
+  cat > "$state_file" <<EOF
+{
+  "loop_id": "$loop_id",
+  "active": true,
+  "executing_on_completion": true,
+  "awaiting_confirmation": false,
+  "spawned_sessions": []
+}
+EOF
+
+  local output
+  output=$(cd "$cancel_dir" && bash "$CANCEL_SCRIPT" --all-stuck 2>&1)
+
+  assert_contains "Cleaned 1 stuck loop" "$output" "Reports 1 loop cleaned"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ ! -d "$cancel_dir/.claude/ralph-fork/$loop_id" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: State directory removed after --all-stuck"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: State directory should be removed after --all-stuck"
+  fi
+  rm -rf "$cancel_dir"
+
+  echo ""
+}
+
+test_all_stuck_cancels_awaiting_confirmation() {
+  echo -e "${YELLOW}Test G: --all-stuck cancels loop with awaiting_confirmation=true${NC}"
+
+  local cancel_dir
+  cancel_dir=$(mktemp -d)
+  local loop_id="stuck-ac-cancel"
+  mkdir -p "$cancel_dir/.claude/ralph-fork/$loop_id"
+  local state_file="$cancel_dir/.claude/ralph-fork/$loop_id/state.json"
+
+  cat > "$state_file" <<EOF
+{
+  "loop_id": "$loop_id",
+  "active": true,
+  "executing_on_completion": false,
+  "awaiting_confirmation": true,
+  "spawned_sessions": []
+}
+EOF
+
+  local output
+  output=$(cd "$cancel_dir" && bash "$CANCEL_SCRIPT" --all-stuck 2>&1)
+
+  assert_contains "Cleaned 1 stuck loop" "$output" "Reports 1 loop cleaned"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ ! -d "$cancel_dir/.claude/ralph-fork/$loop_id" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: State directory removed after --all-stuck"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: State directory should be removed after --all-stuck"
+  fi
+  rm -rf "$cancel_dir"
+
+  echo ""
+}
+
+test_all_stuck_skips_non_stuck() {
+  echo -e "${YELLOW}Test H: --all-stuck skips loop that is active but not stuck${NC}"
+
+  local cancel_dir
+  cancel_dir=$(mktemp -d)
+  local loop_id="active-not-stuck"
+  mkdir -p "$cancel_dir/.claude/ralph-fork/$loop_id"
+  local state_file="$cancel_dir/.claude/ralph-fork/$loop_id/state.json"
+
+  cat > "$state_file" <<EOF
+{
+  "loop_id": "$loop_id",
+  "active": true,
+  "executing_on_completion": false,
+  "awaiting_confirmation": false,
+  "spawned_sessions": []
+}
+EOF
+
+  local output
+  output=$(cd "$cancel_dir" && bash "$CANCEL_SCRIPT" --all-stuck 2>&1)
+
+  assert_contains "No stuck loops found" "$output" "Reports no stuck loops"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ -d "$cancel_dir/.claude/ralph-fork/$loop_id" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: Non-stuck state directory preserved"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: Non-stuck state directory should be preserved"
+  fi
+  rm -rf "$cancel_dir"
+
+  echo ""
+}
+
 test_spawn_site_clears_orphan_flags() {
   echo -e "${YELLOW}Test D: spawn site clears awaiting_background_agents + executing_on_completion${NC}"
 
   local loop_id="test-spawn-site"
   local transcript_file=$(setup_test_env "$loop_id" "spawn_site_test")
 
-  # awaiting_checklist_update=true, awaiting_background_agents=true, stop_hook_active=true
-  create_state_file "$loop_id" 100 1 true false false "" "" true 2
+  # awaiting_checklist_update=true, executing_on_completion=true (stale), awaiting_background_agents=true, stop_hook_active=true
+  # executing_on_completion=true here tests that the spawn site ACTUALLY clears it (non-tautological).
+  create_state_file "$loop_id" 100 1 true false true "" "" true 2
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "Updated the checklist"
 
@@ -615,6 +765,10 @@ test_confirmation_no_on_completion
 test_stale_executing_on_completion
 test_stale_awaiting_confirmation
 test_stale_awaiting_background_agents
+test_stale_awaiting_checklist_update
+test_all_stuck_cancels_eoc
+test_all_stuck_cancels_awaiting_confirmation
+test_all_stuck_skips_non_stuck
 test_spawn_site_clears_orphan_flags
 
 # ============================================================================
