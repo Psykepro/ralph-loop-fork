@@ -790,6 +790,53 @@ debug_log "State: budget=$TOTAL_BUDGET, iterations=$TOTAL_ITERATIONS, session=$S
 debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION, awaiting_background_agents=$AWAITING_BACKGROUND_AGENTS, bg_agent_block_count=$BG_AGENT_BLOCK_COUNT"
 
 # ============================================================================
+# STALE-STATE DETECTOR (stop_hook_active=false only)
+# Fires when the continuation cycle never ran (e.g., session killed mid-BLOCK).
+# Clears stuck flags so the loop recovers instead of staying active=true forever.
+# ============================================================================
+if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
+  # Case 1: executing_on_completion stuck — on-completion ran, continuation never fired.
+  # The loop is logically done; treat it as completed.
+  if [[ "$EXECUTING_ON_COMPLETION" == "true" ]]; then
+    debug_log "STALE-STATE: executing_on_completion=true + stop_hook_active=false — orphaned; completing loop"
+    info "Ralph Loop Fork [$LOOP_ID]: Stale executing_on_completion detected — recovering orphaned loop"
+    info ""
+
+    update_state "$STATE_FILE" ".active = false | .executing_on_completion = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"orphaned_executing_on_completion\""
+
+    debug_log "STALE-STATE: Spawning detached cleanup for orphaned loop"
+    run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+    debug_log "STALE-STATE: Detached cleanup spawned, exiting"
+    exit 0
+  fi
+
+  # Case 2: awaiting_confirmation stuck — confirmation BLOCK was lost (session killed).
+  # Clear the flag and fall through; normal flow re-detects the promise if it's still present.
+  if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
+    debug_log "STALE-STATE: awaiting_confirmation=true + stop_hook_active=false — clearing stale flag"
+    update_state "$STATE_FILE" ".awaiting_confirmation = false"
+    AWAITING_CONFIRMATION="false"
+  fi
+
+  # Case 3: awaiting_checklist_update stuck — checklist-update BLOCK was lost.
+  # Clear the flag and fall through; normal flow re-evaluates the session output.
+  if [[ "$AWAITING_CHECKLIST_UPDATE" == "true" ]]; then
+    debug_log "STALE-STATE: awaiting_checklist_update=true + stop_hook_active=false — clearing stale flag"
+    update_state "$STATE_FILE" ".awaiting_checklist_update = false"
+    AWAITING_CHECKLIST_UPDATE="false"
+  fi
+
+  # Case 4: awaiting_background_agents stuck — session killed while waiting for bg agents.
+  # Those agents are gone; clear the flag and fall through.
+  if [[ "$AWAITING_BACKGROUND_AGENTS" == "true" ]]; then
+    debug_log "STALE-STATE: awaiting_background_agents=true + stop_hook_active=false — clearing stale flag"
+    update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
+    AWAITING_BACKGROUND_AGENTS="false"
+    BG_AGENT_BLOCK_COUNT=0
+  fi
+fi
+
+# ============================================================================
 # HANDLE stop_hook_active=true (CONTINUATION CYCLE)
 # We're in a continuation cycle - Claude responded to a BLOCK
 # We should NOT output another BLOCK, but we might need to SPAWN
