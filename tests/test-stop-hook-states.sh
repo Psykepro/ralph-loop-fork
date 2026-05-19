@@ -547,6 +547,9 @@ test_stale_awaiting_confirmation() {
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}PASS${NC}: No confirmation BLOCK request emitted"
   fi
+  # Positively assert fall-through: RUNNING state ran and issued a block
+  assert_contains '"decision"' "$output" "RUNNING state issued a block decision after fall-through"
+  assert_state_flag "$loop_id" "awaiting_checklist_update" "true" "RUNNING state set awaiting_checklist_update after fall-through"
 
   echo ""
 }
@@ -569,6 +572,9 @@ test_stale_awaiting_background_agents() {
 
   assert_state_flag "$loop_id" "awaiting_background_agents" "false" "awaiting_background_agents cleared by stale detector"
   assert_state_flag "$loop_id" "bg_agent_block_count" "0" "bg_agent_block_count reset to 0"
+  # Positively assert fall-through: RUNNING state ran and issued a block
+  assert_contains '"decision"' "$output" "RUNNING state issued a block decision after fall-through"
+  assert_state_flag "$loop_id" "awaiting_checklist_update" "true" "RUNNING state set awaiting_checklist_update after fall-through"
 
   echo ""
 }
