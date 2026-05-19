@@ -321,14 +321,64 @@ case "$MODE" in
     exit 0
     ;;
 
+  --stuck|--all-stuck)
+    # ----- CANCEL STUCK LOOPS (active=true + executing_on_completion=true OR awaiting_confirmation=true) -----
+    if [[ "$HAS_JQ" != "true" ]]; then
+      echo "Error: jq is required for --all-stuck mode" >&2
+      exit 1
+    fi
+
+    cleaned=0
+    stuck_loop_dir=""
+    stuck_state_file=""
+    stuck_active=""
+    stuck_eoc=""
+    stuck_ac=""
+    stuck_now=""
+    while IFS= read -r loop_id; do
+      [[ -z "$loop_id" ]] && continue
+      stuck_loop_dir=$(resolve_loop_dir "$loop_id")
+      [[ -z "$stuck_loop_dir" ]] && continue
+      stuck_state_file="$stuck_loop_dir/state.json"
+      [[ -f "$stuck_state_file" ]] || continue
+
+      stuck_active=$(jq -r '.active // false' "$stuck_state_file" 2>/dev/null || echo "false")
+      stuck_eoc=$(jq -r '.executing_on_completion // false' "$stuck_state_file" 2>/dev/null || echo "false")
+      stuck_ac=$(jq -r '.awaiting_confirmation // false' "$stuck_state_file" 2>/dev/null || echo "false")
+
+      if [[ "$stuck_active" == "true" ]] && [[ "$stuck_eoc" == "true" || "$stuck_ac" == "true" ]]; then
+        echo "Found stuck loop: $loop_id (active=true, executing_on_completion=$stuck_eoc, awaiting_confirmation=$stuck_ac)"
+
+        # Write cancellation state before removing directory
+        stuck_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        jq --arg ts "$stuck_now" \
+          '.active = false | .completed_at = $ts | .termination_reason = "user_cancelled_stuck"' \
+          "$stuck_state_file" > "${stuck_state_file}.tmp" && mv "${stuck_state_file}.tmp" "$stuck_state_file"
+
+        cancel_loop "$loop_id" || true
+        cleaned=$((cleaned + 1))
+        echo ""
+      fi
+    done < <(enumerate_all_loop_ids)
+
+    if [[ "$cleaned" -eq 0 ]]; then
+      echo "No stuck loops found."
+    else
+      echo "Cleaned $cleaned stuck loop(s)."
+    fi
+    exit 0
+    ;;
+
   -h|--help)
     cat <<'HELP_EOF'
 Cancel Ralph Loop Fork
 
 Usage:
-  /ralph-loop-fork:cancel-ralph-fork --list      List all active loops (read-only)
-  /ralph-loop-fork:cancel-ralph-fork LOOP_ID     Cancel a specific loop
-  /ralph-loop-fork:cancel-ralph-fork --all       Cancel all loops
+  /ralph-loop-fork:cancel-ralph-fork --list        List all loops (read-only)
+  /ralph-loop-fork:cancel-ralph-fork LOOP_ID       Cancel a specific loop
+  /ralph-loop-fork:cancel-ralph-fork --all         Cancel all loops
+  /ralph-loop-fork:cancel-ralph-fork --all-stuck   Cancel stuck loops only
+  /ralph-loop-fork:cancel-ralph-fork --stuck       Alias for --all-stuck
 
 Cancelling a loop:
   - Kills every tmux session associated with the loop (spawned sessions and the
@@ -336,6 +386,12 @@ Cancelling a loop:
     fallback to `tmux ls | grep "^ralph-<LOOP_ID>-"` if state is unreadable.
   - Removes the loop's state directory.
   - The .archive/ directory is preserved (it contains completed loops).
+
+--all-stuck / --stuck:
+  Targets only loops where active=true AND (executing_on_completion=true OR
+  awaiting_confirmation=true). These are loops whose continuation cycle never
+  fired (e.g., the terminal was closed mid-BLOCK). Requires jq.
+  Writes termination_reason="user_cancelled_stuck" before removing state.
 HELP_EOF
     exit 0
     ;;
