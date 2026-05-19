@@ -820,7 +820,7 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     info "Ralph Loop Fork [$LOOP_ID]: Checklist updated, spawning new session..."
     info ""
 
-    update_state "$STATE_FILE" ".awaiting_checklist_update = false | .total_iterations = $((TOTAL_ITERATIONS + 1))"
+    update_state "$STATE_FILE" ".awaiting_checklist_update = false | .total_iterations = $((TOTAL_ITERATIONS + 1)) | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
 
     NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
     update_state "$STATE_FILE" ".session_number = $NEW_SESSION_NUMBER"
@@ -1147,7 +1147,7 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
         info ""
 
         # Clear flag and spawn
-        update_state "$STATE_FILE" ".awaiting_confirmation = false | .total_iterations = $NEW_TOTAL_ITERATIONS"
+        update_state "$STATE_FILE" ".awaiting_confirmation = false | .total_iterations = $NEW_TOTAL_ITERATIONS | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
 
         NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
         update_state "$STATE_FILE" ".session_number = $NEW_SESSION_NUMBER"
@@ -1225,7 +1225,7 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
     info "Ralph Loop Fork [$LOOP_ID]: No confirmation received, continuing work..."
     info ""
 
-    update_state "$STATE_FILE" ".awaiting_confirmation = false | .total_iterations = $NEW_TOTAL_ITERATIONS"
+    update_state "$STATE_FILE" ".awaiting_confirmation = false | .total_iterations = $NEW_TOTAL_ITERATIONS | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
 
     NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
     update_state "$STATE_FILE" ".session_number = $NEW_SESSION_NUMBER"
@@ -1244,7 +1244,7 @@ if [[ "$AWAITING_CHECKLIST_UPDATE" == "true" ]]; then
   info "Ralph Loop Fork [$LOOP_ID]: Checklist updated, spawning new session..."
   info ""
 
-  update_state "$STATE_FILE" ".awaiting_checklist_update = false | .total_iterations = $NEW_TOTAL_ITERATIONS"
+  update_state "$STATE_FILE" ".awaiting_checklist_update = false | .total_iterations = $NEW_TOTAL_ITERATIONS | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
 
   NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
   update_state "$STATE_FILE" ".session_number = $NEW_SESSION_NUMBER"
