@@ -37,6 +37,9 @@ setup_test_env() {
 }
 
 # Create a mock state.json
+# Args: loop_id total_budget total_iterations awaiting_checklist_update awaiting_confirmation
+#        executing_on_completion on_completion_cmd checklist_file
+#        awaiting_background_agents bg_agent_block_count
 create_state_file() {
   local loop_id="$1"
   local total_budget="${2:-100}"
@@ -46,6 +49,8 @@ create_state_file() {
   local executing_on_completion="${6:-false}"
   local on_completion_cmd="${7:-}"
   local checklist_file="${8:-}"
+  local awaiting_background_agents="${9:-false}"
+  local bg_agent_block_count="${10:-0}"
 
   local state_file="$TEST_DIR/.claude/ralph-fork/$loop_id/state.json"
 
@@ -65,6 +70,8 @@ create_state_file() {
   "awaiting_checklist_update": $awaiting_checklist_update,
   "awaiting_confirmation": $awaiting_confirmation,
   "executing_on_completion": $executing_on_completion,
+  "awaiting_background_agents": $awaiting_background_agents,
+  "bg_agent_block_count": $bg_agent_block_count,
   "spawned_sessions": []
 }
 EOF
@@ -480,6 +487,117 @@ test_confirmation_no_on_completion() {
   echo ""
 }
 
+# -----------------------------------------------------------------------------
+# Test A: stop_hook_active=false + executing_on_completion=true → stale recovery
+# -----------------------------------------------------------------------------
+test_stale_executing_on_completion() {
+  echo -e "${YELLOW}Test A: stale executing_on_completion=true → orphaned recovery, no BLOCK${NC}"
+
+  local loop_id="test-stale-eoc"
+  local transcript_file=$(setup_test_env "$loop_id" "stale_eoc_test")
+
+  # executing_on_completion=true, stop_hook_active=false (default)
+  create_state_file "$loop_id" 100 1 false false true
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Some output after on-completion"
+
+  local output=$(run_hook "$transcript_file")
+
+  # Stale detector fires: no "decision" key should appear in stdout JSON
+  if echo "$output" | grep -q '"decision"'; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: No decision block in output (stale detector should not BLOCK)"
+    echo "  Got decision in: $output"
+  else
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: No decision block emitted (stale recovery exits cleanly)"
+  fi
+  assert_state_flag "$loop_id" "active" "false" "Loop marked inactive by stale detector"
+  assert_state_flag "$loop_id" "termination_reason" "orphaned_executing_on_completion" "Stale termination reason set"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test B: stop_hook_active=false + awaiting_confirmation=true, no promise in transcript
+# -----------------------------------------------------------------------------
+test_stale_awaiting_confirmation() {
+  echo -e "${YELLOW}Test B: stale awaiting_confirmation=true → flag cleared, no confirmation BLOCK${NC}"
+
+  local loop_id="test-stale-ac"
+  local transcript_file=$(setup_test_env "$loop_id" "stale_ac_test")
+
+  # awaiting_confirmation=true, no promise in transcript, stop_hook_active=false
+  create_state_file "$loop_id" 100 1 false true false
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Continuing some work without any tags"
+
+  local output=$(run_hook "$transcript_file")
+
+  assert_state_flag "$loop_id" "awaiting_confirmation" "false" "awaiting_confirmation cleared by stale detector"
+  # Output should not contain a confirmation-request block (no "confirmed" prompt)
+  if echo "$output" | grep -qi "confirm.*100"; then
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: Output should not contain confirmation BLOCK request"
+  else
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: No confirmation BLOCK request emitted"
+  fi
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test C: stop_hook_active=false + awaiting_background_agents=true
+# -----------------------------------------------------------------------------
+test_stale_awaiting_background_agents() {
+  echo -e "${YELLOW}Test C: stale awaiting_background_agents=true → flags cleared, no stale BLOCK${NC}"
+
+  local loop_id="test-stale-aba"
+  local transcript_file=$(setup_test_env "$loop_id" "stale_aba_test")
+
+  # awaiting_background_agents=true, bg_agent_block_count=3, stop_hook_active=false
+  create_state_file "$loop_id" 100 1 false false false "" "" true 3
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Some output with no pending agents"
+
+  local output=$(run_hook "$transcript_file")
+
+  assert_state_flag "$loop_id" "awaiting_background_agents" "false" "awaiting_background_agents cleared by stale detector"
+  assert_state_flag "$loop_id" "bg_agent_block_count" "0" "bg_agent_block_count reset to 0"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test D (regression): stop_hook_active=true + awaiting_checklist_update=true +
+#   awaiting_background_agents=true → after spawn: bg flags cleared
+# -----------------------------------------------------------------------------
+test_spawn_site_clears_orphan_flags() {
+  echo -e "${YELLOW}Test D: spawn site clears awaiting_background_agents + executing_on_completion${NC}"
+
+  local loop_id="test-spawn-site"
+  local transcript_file=$(setup_test_env "$loop_id" "spawn_site_test")
+
+  # awaiting_checklist_update=true, awaiting_background_agents=true, stop_hook_active=true
+  create_state_file "$loop_id" 100 1 true false false "" "" true 2
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Updated the checklist"
+
+  # stop_hook_active=true: continuation cycle fires, spawns new session
+  local output=$(run_hook "$transcript_file" true)
+
+  # After spawn: awaiting_background_agents and executing_on_completion must be cleared
+  assert_state_flag "$loop_id" "awaiting_background_agents" "false" "awaiting_background_agents cleared at spawn site"
+  assert_state_flag "$loop_id" "executing_on_completion" "false" "executing_on_completion cleared at spawn site"
+
+  echo ""
+}
+
 # ============================================================================
 # RUN ALL TESTS
 # ============================================================================
@@ -494,6 +612,10 @@ test_promise_found
 test_no_promise
 test_promise_with_unchecked_items
 test_confirmation_no_on_completion
+test_stale_executing_on_completion
+test_stale_awaiting_confirmation
+test_stale_awaiting_background_agents
+test_spawn_site_clears_orphan_flags
 
 # ============================================================================
 # SUMMARY
