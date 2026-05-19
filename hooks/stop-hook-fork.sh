@@ -23,6 +23,9 @@
 # EXECUTING_ON_COMPLETION + next hook → COMPLETED (cleanup + exit)
 # any + budget exhausted → BUDGET_EXHAUSTED (cleanup + exit)
 
+# NOTE: -e intentionally NOT enabled. Non-zero exits occur in normal operation
+# (jq fallbacks, grep with no match, perl, spawn helpers) and must not abort
+# the hook. Any genuinely fatal condition must exit explicitly.
 set -uo pipefail
 
 # ============================================================================
