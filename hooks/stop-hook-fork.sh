@@ -364,8 +364,14 @@ run_cleanup_detached() {
 
   debug_log "DETACHED CLEANUP: Spawning background process for $loop_id"
 
-  # Create a temporary cleanup script
-  local cleanup_script=$(mktemp "${TMPDIR:-/tmp}/ralph-cleanup-XXXXXX.sh")
+  # Create a temporary cleanup script.
+  # NOTE: Split local/assignment so mktemp failure is visible — bash `local var=$(cmd)`
+  # always returns 0, masking the exit code of cmd.
+  local cleanup_script
+  cleanup_script=$(mktemp "${TMPDIR:-/tmp}/ralph-cleanup-XXXXXX.sh") || {
+    debug_log "DETACHED CLEANUP: mktemp failed for $loop_id — cleanup skipped (state already marked inactive)"
+    return 1
+  }
 
   cat > "$cleanup_script" << 'CLEANUP_EOF'
 #!/bin/bash
