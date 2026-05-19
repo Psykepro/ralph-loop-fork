@@ -57,6 +57,11 @@ CHECKLIST_PATH=$(jq -r '.checklist_file // ""' "$STATE_FILE")
 COMMAND=$(jq -r '.command // ""' "$STATE_FILE")
 STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE")
 
+# Resolve CHECKLIST_PATH to absolute so forked sessions launched from any CWD can expand @
+if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECKLIST_PATH" != /* ]]; then
+  CHECKLIST_PATH="$PROJECT_ROOT/$CHECKLIST_PATH"
+fi
+
 # CRITICAL: Generate NEW session token for this forked session
 # This invalidates the old session's token, preventing it from triggering hooks
 # after spawning. Without this, old sessions continue running and spawn duplicates.
@@ -186,14 +191,21 @@ printf '%s' "$FULL_PROMPT" > "$PROMPT_FILE"
 
 # Build command for interactive mode
 # Claude reads prompt from file, session remains fully interactive
-# Prompt file path is relative to loop directory
-PROMPT_FILE_REL=".claude/ralph-fork/$LOOP_ID/prompt.txt"
-INIT_MSG="Read and execute the task in $PROMPT_FILE_REL"
+# Use absolute path so it works regardless of CWD when tmux session starts
+PROMPT_FILE_ABS="$PROJECT_ROOT/.claude/ralph-fork/$LOOP_ID/prompt.txt"
+INIT_MSG="Read and execute the task in $PROMPT_FILE_ABS"
 # CRITICAL: Unset TMUX to allow spawning from inside an existing tmux session (avoids nesting error).
 # CRITICAL: Unset CLAUDECODE to prevent "cannot be launched inside another Claude Code session" error.
 # tmux sessions inherit env vars from the parent process, and CLAUDECODE causes Claude to
 # refuse to start, silently killing the forked session (discovered 2026-02-14).
 FORK_CMD="unset TMUX && unset CLAUDECODE && claude --dangerously-skip-permissions '$INIT_MSG'"
+
+# Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
+if [[ ! -d "$CWD" ]]; then
+  echo "Error: Working directory no longer exists: $CWD" >&2
+  echo "  Loop: $LOOP_ID, expected at: $CWD" >&2
+  exit 1
+fi
 
 echo "Forking to new session: $SESSION_NAME"
 

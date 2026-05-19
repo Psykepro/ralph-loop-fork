@@ -15,3 +15,7 @@ Thumbs.db
 
 # Project-specific scratch directory (not part of the plugin)
 _project/
+
+
+# Claude Code
+.claude/
