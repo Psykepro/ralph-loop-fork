@@ -128,16 +128,19 @@ EOF
   done
 }
 
-# Run the hook with mock environment
+# Run the hook with mock environment.
+# stop_hook_active_val: "false" (default, fresh session) or "true" (continuation cycle).
 run_hook() {
   local transcript_file="$1"
-  local hook_input="${2:-{}}"
+  local stop_hook_active_val="${2:-false}"
 
   # Create hook input JSON
-  local input_json=$(jq -n \
+  local input_json
+  input_json=$(jq -n \
     --arg transcript "$transcript_file" \
+    --argjson sha "$stop_hook_active_val" \
     '{
-      "stop_hook_active": false,
+      "stop_hook_active": $sha,
       "transcript_path": $transcript
     }')
 
@@ -268,7 +271,7 @@ test_budget_exhausted() {
 # Test 2: executing_on_completion=true → cleanup & exit
 # -----------------------------------------------------------------------------
 test_executing_on_completion() {
-  echo -e "${YELLOW}Test 2: executing_on_completion=true → cleanup & exit${NC}"
+  echo -e "${YELLOW}Test 2: executing_on_completion=true + stop_hook_active=false → stale recovery${NC}"
 
   local loop_id="test-on-completion"
   local transcript_file=$(setup_test_env "$loop_id" "on_completion_test")
@@ -279,9 +282,10 @@ test_executing_on_completion() {
 
   local output=$(run_hook "$transcript_file")
 
-  assert_contains "loop complete" "$output" "Output indicates loop complete"
+  # Stale-state detector fires before the old line-923 handler; no BLOCK decision emitted.
+  assert_contains "orphaned" "$output" "Output indicates stale orphaned recovery"
   assert_state_flag "$loop_id" "active" "false" "Loop marked inactive"
-  assert_state_flag "$loop_id" "termination_reason" "on_completion_executed" "Termination reason set"
+  assert_state_flag "$loop_id" "termination_reason" "orphaned_executing_on_completion" "Stale termination reason set"
 
   echo ""
 }
@@ -290,7 +294,7 @@ test_executing_on_completion() {
 # Test 3: awaiting_confirmation + <confirmed>YES + all boxes → on-completion
 # -----------------------------------------------------------------------------
 test_confirmation_success_with_on_completion() {
-  echo -e "${YELLOW}Test 3: awaiting_confirmation + confirmed YES + all boxes → on-completion${NC}"
+  echo -e "${YELLOW}Test 3: awaiting_confirmation + confirmed YES + all boxes → on-completion (continuation cycle)${NC}"
 
   local loop_id="test-confirm-success"
   local transcript_file=$(setup_test_env "$loop_id" "confirm_success_test")
@@ -301,7 +305,8 @@ test_confirmation_success_with_on_completion() {
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "<confirmed>YES</confirmed>"
 
-  local output=$(run_hook "$transcript_file")
+  # Use stop_hook_active=true: AWAITING_CONFIRMATION is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
 
   assert_contains "Confirmation verified" "$output" "Confirmation verified message"
   assert_state_flag "$loop_id" "executing_on_completion" "true" "executing_on_completion flag set"
@@ -315,7 +320,7 @@ test_confirmation_success_with_on_completion() {
 # Test 4: awaiting_confirmation + <confirmed>YES + missing boxes → spawn
 # -----------------------------------------------------------------------------
 test_confirmation_with_missing_boxes() {
-  echo -e "${YELLOW}Test 4: awaiting_confirmation + confirmed YES + missing boxes → spawn${NC}"
+  echo -e "${YELLOW}Test 4: awaiting_confirmation + confirmed YES + missing boxes → spawn (continuation cycle)${NC}"
 
   local loop_id="test-confirm-missing"
   local transcript_file=$(setup_test_env "$loop_id" "confirm_missing_test")
@@ -326,7 +331,8 @@ test_confirmation_with_missing_boxes() {
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "<confirmed>YES</confirmed>"
 
-  local output=$(run_hook "$transcript_file")
+  # Use stop_hook_active=true: AWAITING_CONFIRMATION is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
 
   assert_contains "still unchecked" "$output" "Output mentions unchecked items"
   assert_state_flag "$loop_id" "awaiting_confirmation" "false" "awaiting_confirmation flag cleared"
@@ -339,7 +345,7 @@ test_confirmation_with_missing_boxes() {
 # Test 5: awaiting_confirmation + no confirmed tag → spawn
 # -----------------------------------------------------------------------------
 test_confirmation_no_tag() {
-  echo -e "${YELLOW}Test 5: awaiting_confirmation + no confirmed tag → spawn${NC}"
+  echo -e "${YELLOW}Test 5: awaiting_confirmation + no confirmed tag → spawn (continuation cycle)${NC}"
 
   local loop_id="test-confirm-no-tag"
   local transcript_file=$(setup_test_env "$loop_id" "confirm_no_tag_test")
@@ -348,7 +354,8 @@ test_confirmation_no_tag() {
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "I continued working on the task"
 
-  local output=$(run_hook "$transcript_file")
+  # Use stop_hook_active=true: AWAITING_CONFIRMATION is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
 
   assert_contains "No confirmation received" "$output" "Output mentions no confirmation"
   assert_state_flag "$loop_id" "awaiting_confirmation" "false" "awaiting_confirmation flag cleared"
@@ -360,7 +367,7 @@ test_confirmation_no_tag() {
 # Test 6: awaiting_checklist_update=true → spawn
 # -----------------------------------------------------------------------------
 test_awaiting_checklist_update() {
-  echo -e "${YELLOW}Test 6: awaiting_checklist_update=true → spawn${NC}"
+  echo -e "${YELLOW}Test 6: awaiting_checklist_update=true → spawn (continuation cycle)${NC}"
 
   local loop_id="test-checklist-update"
   local transcript_file=$(setup_test_env "$loop_id" "checklist_update_test")
@@ -369,7 +376,8 @@ test_awaiting_checklist_update() {
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "Updated the checklist"
 
-  local output=$(run_hook "$transcript_file")
+  # Use stop_hook_active=true: awaiting_checklist_update is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
 
   assert_contains "Checklist updated" "$output" "Output mentions checklist updated"
   assert_state_flag "$loop_id" "awaiting_checklist_update" "false" "awaiting_checklist_update flag cleared"
@@ -452,7 +460,7 @@ test_promise_with_unchecked_items() {
 # Test 10: Confirmation without on-completion command → complete loop
 # -----------------------------------------------------------------------------
 test_confirmation_no_on_completion() {
-  echo -e "${YELLOW}Test 10: Confirmation without on-completion → complete${NC}"
+  echo -e "${YELLOW}Test 10: Confirmation without on-completion → complete (continuation cycle)${NC}"
 
   local loop_id="test-confirm-no-cmd"
   local transcript_file=$(setup_test_env "$loop_id" "confirm_no_cmd_test")
@@ -463,7 +471,8 @@ test_confirmation_no_on_completion() {
   create_local_file "$loop_id" 1
   create_transcript "$transcript_file" "$loop_id" "<confirmed>YES</confirmed>"
 
-  local output=$(run_hook "$transcript_file")
+  # Use stop_hook_active=true: AWAITING_CONFIRMATION is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
 
   assert_contains "loop complete" "$output" "Output indicates loop complete"
   assert_state_flag "$loop_id" "active" "false" "Loop marked inactive"
