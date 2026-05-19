@@ -595,7 +595,7 @@ test_stale_awaiting_checklist_update() {
 
   # The stale detector clears the flag and falls through; RUNNING state re-evaluates.
   # No promise found → RUNNING state sets awaiting_checklist_update=true (that's OK) and issues BLOCK.
-  # Key: output comes from RUNNING state ("SESSION ENDING"), NOT the old handler ("Checklist updated").
+  # Key: output comes from RUNNING state, NOT the old handler ("Checklist updated").
   if echo "$output" | grep -q "Checklist updated, spawning new session"; then
     TESTS_RUN=$((TESTS_RUN + 1))
     TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -605,7 +605,10 @@ test_stale_awaiting_checklist_update() {
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}PASS${NC}: Old direct-spawn path did not fire (stale detector fell through to RUNNING)"
   fi
-  assert_contains "SESSION ENDING" "$output" "RUNNING state ran after stale-flag clear"
+  # RUNNING state issued a block (decision:block in JSON output)
+  assert_contains '"decision"' "$output" "RUNNING state issued a block decision"
+  # RUNNING state re-set awaiting_checklist_update=true after stale-detector cleared it
+  assert_state_flag "$loop_id" "awaiting_checklist_update" "true" "awaiting_checklist_update re-set by RUNNING state"
 
   echo ""
 }
@@ -726,6 +729,33 @@ EOF
   echo ""
 }
 
+test_malformed_message_spawn_site() {
+  echo -e "${YELLOW}Test I: malformed-message spawn site clears awaiting_background_agents${NC}"
+
+  local loop_id="test-malformed-spawn"
+  local transcript_file=$(setup_test_env "$loop_id" "malformed_spawn_test")
+
+  # awaiting_background_agents=true (stale), executing_on_completion=false
+  create_state_file "$loop_id" 100 1 false false false "" "" true 1
+  create_local_file "$loop_id" 1
+
+  # Transcript with tool_use-only content — no text output from assistant
+  cat > "$transcript_file" <<EOF
+{"type":"user","message":{"role":"user","content":"RALPH LOOP CONTEXT (Loop: $loop_id, Session 1, Token: abc123): Test"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo test"}}]}}
+EOF
+
+  local output=$(run_hook "$transcript_file")
+
+  # Stale detector (Case 4) clears aba; malformed-message spawn site also clears it
+  assert_state_flag "$loop_id" "awaiting_background_agents" "false" "awaiting_background_agents cleared"
+  # Malformed-message handler sets awaiting_checklist_update=true and issues a BLOCK
+  assert_state_flag "$loop_id" "awaiting_checklist_update" "true" "awaiting_checklist_update set by malformed-message handler"
+  assert_contains '"decision"' "$output" "Malformed-message handler issued a block decision"
+
+  echo ""
+}
+
 test_spawn_site_clears_orphan_flags() {
   echo -e "${YELLOW}Test D: spawn site clears awaiting_background_agents + executing_on_completion${NC}"
 
@@ -769,6 +799,7 @@ test_stale_awaiting_checklist_update
 test_all_stuck_cancels_eoc
 test_all_stuck_cancels_awaiting_confirmation
 test_all_stuck_skips_non_stuck
+test_malformed_message_spawn_site
 test_spawn_site_clears_orphan_flags
 
 # ============================================================================
