@@ -800,6 +800,8 @@ if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
   if [[ "$EXECUTING_ON_COMPLETION" == "true" ]]; then
     debug_log "STALE-STATE: executing_on_completion=true + stop_hook_active=false — orphaned; completing loop"
     info "Ralph Loop Fork [$LOOP_ID]: Stale executing_on_completion detected — recovering orphaned loop"
+    info "   NOTE: The on-completion command may or may not have run before the session was killed."
+    info "   Check termination_reason='orphaned_executing_on_completion' in state.json for audit trail."
     info ""
 
     update_state "$STATE_FILE" ".active = false | .executing_on_completion = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"orphaned_executing_on_completion\""
@@ -1110,8 +1112,8 @@ if [[ -z "$LAST_OUTPUT" ]]; then
     info "Ralph Loop Fork [$LOOP_ID]: Session ended without text output, requesting status..."
     info ""
 
-    # Set flag to track this special case
-    update_state "$STATE_FILE" ".awaiting_checklist_update = true"
+    # Set flag to track this special case; clear orphan flags consistent with all other spawn sites
+    update_state "$STATE_FILE" ".awaiting_checklist_update = true | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
 
     CHECKLIST_CONTENT=""
     CHECKED_COUNT=0
@@ -1285,6 +1287,12 @@ fi
 
 # ============================================================================
 # STATE MACHINE: CHECK awaiting_checklist_update
+# Defense-in-depth: in practice this block is unreachable because
+# (a) stop_hook_active=true + awaiting_checklist_update=true is handled by the
+#     continuation-cycle block above (line ~848, spawns + exits), and
+# (b) stop_hook_active=false + awaiting_checklist_update=true is cleared by the
+#     stale-state detector above (line ~823) before reaching here.
+# Retained so any future code path that sets the flag still works correctly.
 # ============================================================================
 if [[ "$AWAITING_CHECKLIST_UPDATE" == "true" ]]; then
   debug_log "STATE: AWAITING_CHECKLIST_UPDATE - LLM updated checklist, spawning new session"
