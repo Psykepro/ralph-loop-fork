@@ -393,11 +393,16 @@ This prevents false completion claims when work is not actually done.
 
 # Cancel all loops (archives are preserved)
 /ralph-loop-fork:cancel-ralph-fork --all
+
+# Cancel only stuck loops (session killed mid-BLOCK, continuation never fired)
+/ralph-loop-fork:cancel-ralph-fork --all-stuck
 ```
 
 > **Cancel vs. complete**: `cancel-ralph-fork` removes the state directory
 > *without* archiving it and kills all associated tmux sessions. Normally
 > completed loops are moved to `.claude/ralph-fork/.archive/` automatically.
+
+> **Stuck loops**: If a tmux session is killed while Claude is responding to a BLOCK (e.g., updating the checklist), the continuation cycle never fires and the loop stays `active=true` permanently. The stop hook auto-recovers these on the next session start. For bulk manual cleanup, use `--all-stuck`.
 
 ---
 
@@ -450,6 +455,7 @@ tail -f "${RALPH_FORK_LOG_DIR:-/tmp/ralph-fork-logs}/ralph-fork-$(date +%Y-%m-%d
 | Fork not spawning | Verify tmux: `tmux -V` |
 | Session already exists error | Remove stale session: `tmux kill-session -t ralph-LOOP_ID-N` |
 | State corrupted | Cancel and restart: `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` |
+| Loop stuck `active=true` (session killed mid-BLOCK) | Run `/ralph-loop-fork:cancel-ralph-fork --all-stuck` to bulk-cancel, or just start a new session — the stop hook auto-recovers on the next run |
 | Loop ID conflict | Use a unique `--name` or omit it for auto-generated ID |
 | Wrong loop triggered | Check only one `local.md` exists: `ls .claude/ralph-fork/*/local.md` |
 

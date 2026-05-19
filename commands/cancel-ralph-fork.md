@@ -1,6 +1,6 @@
 ---
-description: "Cancel active Ralph Loop Fork (by name, --list, or --all)"
-argument-hint: "[LOOP_ID | --list | --all]"
+description: "Cancel active Ralph Loop Fork (by name, --list, --all, or --all-stuck)"
+argument-hint: "[LOOP_ID | --list | --all | --all-stuck]"
 allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/cancel-ralph-loop-fork.sh:*)"]
 hide-from-slash-command-tool: "true"
 ---
@@ -19,6 +19,7 @@ Execute the cancel script:
 /ralph-loop-fork:cancel-ralph-fork --list        # List all active loops (read-only)
 /ralph-loop-fork:cancel-ralph-fork LOOP_ID       # Cancel a specific loop
 /ralph-loop-fork:cancel-ralph-fork --all         # Cancel all loops
+/ralph-loop-fork:cancel-ralph-fork --all-stuck   # Cancel only stuck loops
 ```
 
 ## What it does
@@ -26,6 +27,7 @@ Execute the cancel script:
 - `--list`: Shows every active loop with `active`, `sessions`, and `iterations/budget`. Does not touch anything.
 - `LOOP_ID`: Kills every tmux session belonging to the loop (spawned + original launcher), then removes its state directory at `.claude/ralph-fork/<LOOP_ID>/`.
 - `--all`: Same as above for every loop. The `.claude/ralph-fork/.archive/` directory is preserved.
+- `--all-stuck` / `--stuck`: Targets only loops where `active=true` AND (`executing_on_completion=true` OR `awaiting_confirmation=true`). These are loops whose continuation cycle never fired — typically because the tmux session was killed mid-BLOCK. Writes `termination_reason=user_cancelled_stuck` before removing state. Requires `jq`.
 
 ## Session discovery
 
