@@ -133,7 +133,7 @@ shopt -u nullglob
 for src in "$@"; do
   [[ -z "$src" ]] && continue
   if [[ ! -e "$src" ]]; then
-    echo "Warning: --copy-paths entry not found, skipping: $src" >&2
+    echo "⚠️  Warning (non-fatal): --copy-paths entry not found, skipping: $src" >&2
     continue
   fi
   dest="$WORKTREE_ABS/$src"
