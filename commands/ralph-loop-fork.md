@@ -11,48 +11,11 @@ Execute the setup script to initialize the fork-based Ralph loop:
 
 ```!
 "${CLAUDE_PLUGIN_ROOT}/scripts/setup-ralph-loop-fork.sh" $ARGUMENTS
-SETUP_EXIT=$?
-
-if [ $SETUP_EXIT -ne 0 ]; then
-  echo ""
-  echo "======================================================================="
-  echo " ERROR: Ralph Loop Fork setup FAILED (exit code $SETUP_EXIT)"
-  echo " Check the error message above and fix the arguments."
-  echo "======================================================================="
-  exit $SETUP_EXIT
-fi
-
-# Display completion promise reminder if set
-if [ -d .claude/ralph-fork ]; then
-  for loop_dir in .claude/ralph-fork/*/; do
-    if [ -f "${loop_dir}local.md" ]; then
-      LOOP_ID=$(basename "$loop_dir")
-      PROMISE=$(grep '^completion_promise:' "${loop_dir}local.md" | sed 's/completion_promise: *//' | sed 's/^"\(.*\)"$/\1/')
-      if [ -n "$PROMISE" ] && [ "$PROMISE" != "null" ]; then
-        echo ""
-        echo "======================================================================="
-        echo " Ralph Loop Fork [$LOOP_ID] - Completion Promise"
-        echo "======================================================================="
-        echo ""
-        echo " To complete this loop, output this EXACT text:"
-        echo "   <promise>$PROMISE</promise>"
-        echo ""
-        echo " STRICT REQUIREMENTS (DO NOT VIOLATE):"
-        echo "   - Use <promise> XML tags EXACTLY as shown above"
-        echo "   - The statement MUST be completely and unequivocally TRUE"
-        echo "   - Do NOT output false statements to exit the loop"
-        echo ""
-        echo " FORK BEHAVIOR:"
-        echo "   When you exit without the promise, a NEW terminal session"
-        echo "   will be spawned with fresh context. This continues until:"
-        echo "   - You output the completion promise (success)"
-        echo "   - Total budget is exhausted"
-        echo "======================================================================="
-      fi
-    fi
-  done
-fi
 ```
+
+The script prints all status output itself: a `✅` banner on success, a `❌ ERROR` block on failure. The completion-promise reminder is part of that output (non-worktree mode) or delivered to the spawned worktree session via its prompt — no post-processing is needed here.
+
+If the command result contains a `❌ ERROR` block, the loop did NOT start — report the error to the user and fix the arguments before retrying. Lines starting with `⚠️` are non-fatal warnings; the loop still started.
 
 ## What Happens Next
 

@@ -13,16 +13,23 @@ set -euo pipefail
 # Resolve plugin root for direct invocation (when CLAUDE_PLUGIN_ROOT is unset).
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
+# Colors only when the stream is a real terminal (tmux attach, direct runs).
+# Captured output (Claude Code slash commands) shows raw escape bytes as
+# clutter, so there the ❌/✅/⚠️ markers carry the signal instead.
+if [[ -t 2 ]]; then RED_E=$'\033[1;31m'; RST_E=$'\033[0m'; else RED_E=""; RST_E=""; fi
+if [[ -t 1 ]]; then GRN_O=$'\033[1;32m'; RST_O=$'\033[0m'; else GRN_O=""; RST_O=""; fi
+
 # Print a red bordered error block. Usage: _err "title" ["detail" ...]
 _err() {
   local msg="$1"; shift
   echo "" >&2
-  echo -e "\033[1;31m=======================================================================\033[0m" >&2
-  echo -e "\033[1;31m  ERROR: $msg\033[0m" >&2
+  echo "${RED_E}=======================================================================${RST_E}" >&2
+  echo "${RED_E} ❌ ERROR: $msg${RST_E}" >&2
   for detail in "$@"; do
-    echo -e "\033[1;31m         $detail\033[0m" >&2
+    echo "${RED_E}    $detail${RST_E}" >&2
   done
-  echo -e "\033[1;31m=======================================================================\033[0m" >&2
+  echo "${RED_E}=======================================================================${RST_E}" >&2
+  echo "${RED_E} The loop was NOT started.${RST_E}" >&2
   echo "" >&2
 }
 
@@ -511,7 +518,7 @@ else
 }
 EOF
 
-  echo "Ralph Loop Fork activated: $LOOP_ID"
+  echo "${GRN_O}✅ Ralph Loop Fork activated: $LOOP_ID${RST_O}"
   echo ""
   echo "Loop ID: $LOOP_ID"
   echo "Session: 1"
@@ -695,6 +702,9 @@ if [[ "$WORKTREE" == "true" ]]; then
   # already cleared any stale copy at the destination.
   rm -rf "$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID"
   mv "$LOOP_DIR" "$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID"
+  # Don't leave an empty ralph-fork/ behind in the main repo (rmdir is a
+  # no-op if another loop's state still lives there).
+  rmdir .claude/ralph-fork 2>/dev/null || true
 
   # Record the absolute worktree path inside the moved state.json so cancel
   # and resume both see it.
@@ -727,9 +737,9 @@ if [[ "$WORKTREE" == "true" ]]; then
   trap - EXIT
 
   echo ""
-  echo "================================================================="
-  echo " Worktree mode — loop started in isolation"
-  echo "================================================================="
+  echo "${GRN_O}=================================================================${RST_O}"
+  echo "${GRN_O} ✅ Worktree mode — loop started in isolation${RST_O}"
+  echo "${GRN_O}=================================================================${RST_O}"
   echo " Worktree:  $WORKTREE_PATH_ABS"
   echo " Branch:    $BRANCH_NAME"
   echo " Session:   $SESSION_NAME"
