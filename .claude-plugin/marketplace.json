@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "ralph-loop-fork-marketplace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ralph Loop Fork — run long multi-step tasks across fresh Claude sessions via tmux, with state persisted across session boundaries.",
   "owner": {
     "name": "Nikolay Nedkov",
@@ -11,7 +11,7 @@
     {
       "name": "ralph-loop-fork",
       "description": "Fork-based Ralph Loop that spawns a new tmux session per iteration, keeping each session's context window fresh for long-running tasks.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Nikolay Nedkov",
         "email": "nikolai_nedkov@yahoo.com"
