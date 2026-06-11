@@ -774,12 +774,17 @@ fi
 # transcript is empty (happens when the session was launched via
 # `claude --dangerously-skip-permissions 'message'` in tmux -- the CLI
 # message is stored in memory, not written to the .jsonl file).
+# USED_WORKTREE_FALLBACK=true when the worktree path match is used instead of
+# transcript; the "no assistant messages" handler uses this flag to BLOCK instead
+# of deleting local.md and exiting (which would kill the loop).
+USED_WORKTREE_FALLBACK=false
 LOOP_ID=$(extract_loop_from_transcript "$TRANSCRIPT_PATH") || {
   debug_log "No RALPH LOOP CONTEXT in transcript - trying worktree fallback"
   LOOP_ID=$(extract_loop_from_worktree_state) || {
     debug_log "No RALPH LOOP CONTEXT in transcript and no matching worktree state - not a ralph session, exiting cleanly"
     exit 0
   }
+  USED_WORKTREE_FALLBACK=true
 }
 
 debug_log "Found active loop: $LOOP_ID"
@@ -998,9 +1003,18 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
       # Fall through to normal flow (don't exit)
     fi
   else
-    # Other states in continuation cycle - just exit cleanly
-    debug_log "CONTINUATION: No special state - exiting cleanly"
-    exit 0
+    if [[ "$USED_WORKTREE_FALLBACK" == "true" ]]; then
+      # Worktree mode: we previously BLOCKed to get Claude's status declaration.
+      # Claude's response is now in the transcript (continuation turns ARE written
+      # even when the initial tmux-launched session is not). Fall through to the
+      # normal flow so we can check for the completion promise, checklist changes,
+      # and iteration counter — then spawn or complete as appropriate.
+      debug_log "CONTINUATION: No special state (worktree fallback) - falling through to normal flow"
+    else
+      # Standard mode: no special state in continuation — exit cleanly.
+      debug_log "CONTINUATION: No special state - exiting cleanly"
+      exit 0
+    fi
   fi
 fi
 
@@ -1091,8 +1105,77 @@ fi
 # ============================================================================
 if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null; then
   debug_log "No assistant messages found in transcript"
-  rm -f "$LOCAL_FILE"
-  exit 0
+
+  if [[ "$USED_WORKTREE_FALLBACK" == "true" ]] && [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
+    # Worktree mode, first hook call: the initial tmux session turn is never written
+    # to disk. BLOCK once — the continuation turn (Claude's response to the block
+    # prompt) IS written to the transcript. Do NOT delete local.md.
+    debug_log "WORKTREE FALLBACK: empty transcript on first call — blocking for status declaration"
+    info "Ralph Loop Fork [$LOOP_ID]: Worktree session ended without transcript — requesting status..."
+    info ""
+
+    CHECKLIST_CONTENT=""
+    CHECKED_COUNT=0
+    UNCHECKED_COUNT=0
+    if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+      CHECKLIST_CONTENT=$(read_checklist_content "$CHECKLIST_PATH")
+      ITEM_COUNTS=$(count_checklist_items "$CHECKLIST_PATH")
+      UNCHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f1)
+      CHECKED_COUNT=$(echo "$ITEM_COUNTS" | cut -d: -f2)
+    fi
+
+    STATUS_PROMPT="RALPH LOOP [$LOOP_ID] — STATUS DECLARATION REQUIRED
+
+The stop hook cannot read your prior output because this session runs in a tmux worktree
+where the initial conversation turn is not written to the .jsonl transcript.
+
+CURRENT CHECKLIST STATE: ${CHECKED_COUNT} checked, ${UNCHECKED_COUNT} unchecked
+
+$(if [[ -n "$CHECKLIST_CONTENT" ]]; then echo "=== CHECKLIST ===" && echo "$CHECKLIST_CONTENT" && echo "=== END CHECKLIST ==="; fi)
+
+Choose exactly ONE of the following actions:
+
+A) You completed some (but not all) work this session:
+   → Update the checklist file to mark all items you completed [x]
+   → Then stop. A new session will be spawned automatically to continue.
+
+B) ALL checklist work is 100% complete:
+   → Ensure every checklist item is marked [x]
+   → Then output EXACTLY:
+   <promise>${COMPLETION_PROMISE}</promise>
+   (The XML tags are required for completion detection)
+
+Do not describe your work — just take the correct action."
+
+    update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
+
+    jq -n \
+      --arg prompt "$STATUS_PROMPT" \
+      --arg msg "Ralph [$LOOP_ID]: declare status (transcript empty in worktree mode)" \
+      '{
+        "decision": "block",
+        "reason": $prompt,
+        "systemMessage": $msg
+      }'
+    exit 0
+
+  elif [[ "$USED_WORKTREE_FALLBACK" == "true" ]] && [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
+    # Worktree mode, continuation call: transcript still empty even after the BLOCK.
+    # Continuation turns should be written — if they are not, we cannot wait forever.
+    # Spawn the next session so the loop continues rather than silently dying.
+    debug_log "WORKTREE FALLBACK: transcript still empty after block — spawning next session (fallback)"
+    info "Ralph Loop Fork [$LOOP_ID]: Continuation transcript empty — spawning next session..."
+    info ""
+    NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
+    update_state "$STATE_FILE" ".total_iterations = $((TOTAL_ITERATIONS + 1)) | .session_number = $NEW_SESSION_NUMBER | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
+    rm -f "$LOCAL_FILE"
+    spawn_new_session "$LOOP_ID" "$NEW_SESSION_NUMBER" "$STATE_FILE" "$PLUGIN_ROOT" "$PROJECT_ROOT"
+    exit 0
+
+  else
+    rm -f "$LOCAL_FILE"
+    exit 0
+  fi
 fi
 
 LAST_LINE=$(grep '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null | tail -1) || LAST_LINE=""
