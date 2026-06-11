@@ -84,6 +84,22 @@ count_checklist_items() {
 }
 
 # ============================================================================
+# GIT DIRTY CHECK FOR CHECKLIST FILE
+# Returns 0 (true) if the checklist file has uncommitted git changes.
+# Returns 1 (false) if git is unavailable, not a git repo, or file is clean.
+# ============================================================================
+checklist_is_git_dirty() {
+  local file="$1"
+  [[ -z "$file" ]] && return 1
+  [[ ! -f "$file" ]] && return 1
+  command -v git >/dev/null 2>&1 || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local status
+  status=$(git status --porcelain -- "$file" 2>/dev/null) || return 1
+  [[ -n "$status" ]]
+}
+
+# ============================================================================
 # READ CHECKLIST CONTENT HELPER
 # ============================================================================
 read_checklist_content() {
@@ -665,6 +681,44 @@ extract_loop_from_transcript() {
 }
 
 # ============================================================================
+# WORKTREE FALLBACK: LOOP ID DETECTION VIA STATE.JSON
+# ============================================================================
+# When `claude --dangerously-skip-permissions 'message'` launches a fresh
+# tmux session in a worktree, the initial CLI message is NOT written to the
+# .jsonl transcript (only the ai-title line is written). This means the
+# RALPH LOOP CONTEXT marker -- which lives in the prompt FILE, not in the
+# CLI message -- is never present in the transcript, causing transcript-based
+# detection to fail and the stop hook to exit without forking.
+#
+# Fallback: scan .claude/ralph-fork/*/state.json from PWD for an active loop
+# whose worktree_path matches the current directory.
+extract_loop_from_worktree_state() {
+  local current_pwd
+  current_pwd="$(cd "$(pwd)" 2>/dev/null && pwd)" || return 1
+
+  local found_id=""
+  for state_file in .claude/ralph-fork/*/state.json; do
+    [[ -f "$state_file" ]] || continue
+    local is_active worktree_path loop_id
+    is_active=$(jq -r '.active // false' "$state_file" 2>/dev/null) || continue
+    [[ "$is_active" == "true" ]] || continue
+    worktree_path=$(jq -r '.worktree_path // ""' "$state_file" 2>/dev/null) || continue
+    [[ -n "$worktree_path" ]] && [[ "$worktree_path" != "null" ]] || continue
+    local worktree_abs
+    worktree_abs="$(cd "$worktree_path" 2>/dev/null && pwd)" || continue
+    if [[ "$worktree_abs" == "$current_pwd" ]]; then
+      loop_id=$(jq -r '.loop_id // ""' "$state_file" 2>/dev/null) || continue
+      [[ -n "$loop_id" ]] && [[ "$loop_id" != "null" ]] || continue
+      debug_log "WORKTREE FALLBACK: matched active loop '$loop_id' via worktree_path=$worktree_path"
+      echo "$loop_id"
+      return 0
+    fi
+  done
+  debug_log "WORKTREE FALLBACK: no active state.json matched current PWD=$current_pwd"
+  return 1
+}
+
+# ============================================================================
 # SPAWN NEW SESSION HELPER
 # ============================================================================
 spawn_new_session() {
@@ -716,10 +770,16 @@ if [[ -z "$TRANSCRIPT_PATH" ]] || [[ "$TRANSCRIPT_PATH" == "null" ]] || [[ ! -f 
   exit 0
 fi
 
-# Extract loop ID from transcript
+# Extract loop ID from transcript; fall back to worktree-path matching if the
+# transcript is empty (happens when the session was launched via
+# `claude --dangerously-skip-permissions 'message'` in tmux -- the CLI
+# message is stored in memory, not written to the .jsonl file).
 LOOP_ID=$(extract_loop_from_transcript "$TRANSCRIPT_PATH") || {
-  debug_log "No RALPH LOOP CONTEXT in transcript - not a ralph session, exiting cleanly"
-  exit 0
+  debug_log "No RALPH LOOP CONTEXT in transcript - trying worktree fallback"
+  LOOP_ID=$(extract_loop_from_worktree_state) || {
+    debug_log "No RALPH LOOP CONTEXT in transcript and no matching worktree state - not a ralph session, exiting cleanly"
+    exit 0
+  }
 }
 
 debug_log "Found active loop: $LOOP_ID"
@@ -1391,6 +1451,58 @@ $STOP_HOOK_REMINDERS
       jq -n \
         --arg prompt "$REJECT_PROMPT" \
         --arg msg "Ralph [$LOOP_ID]: $UNCHECKED unchecked items - update checklist" \
+        '{
+          "decision": "block",
+          "reason": $prompt,
+          "systemMessage": $msg
+        }'
+      exit 0
+    fi
+  fi
+
+
+  # Git dirty check: if checklist has uncommitted changes, block before confirming.
+  # Only applies when git is available and the path is inside a git repo.
+  if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+    if checklist_is_git_dirty "$CHECKLIST_PATH"; then
+      GIT_STATUS_LINE=$(git status --porcelain -- "$CHECKLIST_PATH" 2>/dev/null || echo "(unable to get git status)")
+      debug_log "Checklist has uncommitted git changes: $GIT_STATUS_LINE"
+      info "Ralph Loop Fork [$LOOP_ID]: Checklist has uncommitted git changes - commit before completing"
+      info ""
+
+      update_state "$STATE_FILE" ".awaiting_checklist_update = true"
+
+      DIRTY_PROMPT="RALPH LOOP: COMPLETION REJECTED - UNCOMMITTED CHECKLIST CHANGES
+
+You output <promise>$COMPLETION_PROMISE</promise> and all boxes are [x], but the
+checklist file has uncommitted changes in git:
+
+  $GIT_STATUS_LINE
+
+The stop hook requires the checklist to be committed so the [x] ticks are
+preserved after the worktree is cleaned up (uncommitted changes are lost on
+worktree removal, which is what caused this protection to be added).
+
+═══════════════════════════════════════════════════════════════════════════════
+REQUIRED BEFORE RE-OUTPUTTING THE PROMISE
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Stage the checklist file:
+     git add <path/to/checklist>
+
+2. Commit:
+     git commit -m "chore: tick checklist items — <brief description>"
+
+3. Re-output the promise:
+     <promise>$COMPLETION_PROMISE</promise>$(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; then echo "
+
+=== REMINDERS ===
+$STOP_HOOK_REMINDERS
+=== END REMINDERS ==="; fi)"
+
+      jq -n \
+        --arg prompt "$DIRTY_PROMPT" \
+        --arg msg "Ralph [$LOOP_ID]: Checklist has uncommitted changes - commit first" \
         '{
           "decision": "block",
           "reason": $prompt,
