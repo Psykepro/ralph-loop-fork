@@ -1693,6 +1693,107 @@ $STOP_HOOK_REMINDERS
     fi
   fi
 
+  # AEOS marker gate: evidence-marker check before accepting completion promise.
+  # Active only when .aeos-config.json present with non-empty required_markers (W4 fail-open).
+  # Sets awaiting_checklist_update=true so the continuation cycle spawns the next session.
+  if [[ -f "$AEOS_CONFIG_FILE" ]]; then
+    _MG_MARKERS=$(jq -r '.required_markers // [] | map(select(length>0)) | join(" ")' "$AEOS_CONFIG_FILE" 2>/dev/null) || _MG_MARKERS=""
+    _MG_PLAN_DIR=$(jq -r '.plan_dir // ""' "$AEOS_CONFIG_FILE" 2>/dev/null) || _MG_PLAN_DIR=""
+
+    if [[ -n "$_MG_MARKERS" ]] && [[ -n "$_MG_PLAN_DIR" ]]; then
+      _MG_MISSING=()
+      for _marker in $_MG_MARKERS; do
+        if [[ ! -f "$PROJECT_ROOT/$_MG_PLAN_DIR/.evidence/$_marker" ]]; then
+          _MG_MISSING+=("$_marker")
+        fi
+      done
+
+      if [[ ${#_MG_MISSING[@]} -gt 0 ]]; then
+        # Increment marker_block_count gated on first hook fire per fork.
+        _MG_COUNT=$(jq -r '.marker_block_count // 0' "$STATE_FILE" 2>/dev/null) || _MG_COUNT=0
+        if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
+          _MG_COUNT=$((_MG_COUNT + 1))
+          update_state "$STATE_FILE" ".marker_block_count = $_MG_COUNT | .awaiting_checklist_update = true"
+        else
+          update_state "$STATE_FILE" ".awaiting_checklist_update = true"
+        fi
+
+        _MG_MISSING_LIST=""
+        for _marker in "${_MG_MISSING[@]}"; do
+          _MG_MISSING_LIST="${_MG_MISSING_LIST:+${_MG_MISSING_LIST}, }${_marker}"
+        done
+
+        _MG_CMD_BLOCK=""
+        for _marker in "${_MG_MISSING[@]}"; do
+          case "$_marker" in
+            tested)
+              _MG_CMD_BLOCK="${_MG_CMD_BLOCK}  <test-command> | python3 .claude/scripts/mark.py tested --plan ${_MG_PLAN_DIR}
+"
+              ;;
+            reviewed)
+              _MG_CMD_BLOCK="${_MG_CMD_BLOCK}  python3 .claude/scripts/mark.py reviewed --plan ${_MG_PLAN_DIR} --critical 0 --warnings 0 --info 0
+"
+              ;;
+            manual-tested)
+              _MG_CMD_BLOCK="${_MG_CMD_BLOCK}  echo '<describe what you tested and observed>' | python3 .claude/scripts/mark.py manual-tested --plan ${_MG_PLAN_DIR}
+"
+              ;;
+            *)
+              _MG_CMD_BLOCK="${_MG_CMD_BLOCK}  python3 .claude/scripts/mark.py ${_marker} --plan ${_MG_PLAN_DIR}
+"
+              ;;
+          esac
+        done
+
+        _MG_ESCALATION=""
+        if [[ $_MG_COUNT -ge 3 ]]; then
+          _MG_ESCALATION="
+
+⚠️  This is marker-block #$_MG_COUNT. If evidence markers cannot be written (test
+   suite unavailable, environment issue, etc.), record a revision and let the
+   revision-budget mechanism terminate the loop cleanly:
+     python3 .claude/scripts/loop_state.py add-revision \\
+       --plan $_MG_PLAN_DIR \\
+       --source verifier \\
+       --categories testing \\
+       --summary \"Evidence markers unavailable — cannot satisfy evidence requirements\""
+        fi
+
+        MARKER_GATE_MSG="RALPH LOOP: COMPLETION BLOCKED — EVIDENCE MARKERS MISSING
+
+You output <promise>$COMPLETION_PROMISE</promise> but required evidence markers are absent.
+  Missing: $_MG_MISSING_LIST
+
+═══════════════════════════════════════════════════════════════════════════════
+REQUIRED BEFORE RE-OUTPUTTING THE PROMISE
+═══════════════════════════════════════════════════════════════════════════════
+
+Run the mark.py command(s) for each missing marker:
+
+${_MG_CMD_BLOCK}
+Then re-output the promise:
+  <promise>$COMPLETION_PROMISE</promise>${_MG_ESCALATION}"
+
+        jq -n \
+          --arg prompt "$MARKER_GATE_MSG" \
+          --arg msg "Ralph [$LOOP_ID]: Evidence markers missing: $_MG_MISSING_LIST (block #$_MG_COUNT)" \
+          '{
+            "decision": "block",
+            "reason": $prompt,
+            "systemMessage": $msg
+          }'
+        debug_log "AEOS marker gate: BLOCK, missing=[$_MG_MISSING_LIST], block_count=$_MG_COUNT"
+        exit 0
+      else
+        # All markers present — reset consecutive block counter.
+        update_state "$STATE_FILE" ".marker_block_count = 0"
+        debug_log "AEOS marker gate: all required markers present ($_MG_MARKERS)"
+      fi
+    else
+      debug_log "AEOS marker gate: required_markers empty or plan_dir absent — skipping"
+    fi
+  fi
+
   # All boxes checked (or no checklist) - ask for confirmation
   info "Ralph Loop Fork [$LOOP_ID]: Promise detected, requesting confirmation..."
   info ""
