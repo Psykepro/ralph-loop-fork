@@ -19,3 +19,6 @@ _project/
 
 # Claude Code
 .claude/
+
+# Runtime lock files (stale after process exits)
+.in_use/

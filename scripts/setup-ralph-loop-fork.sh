@@ -567,10 +567,14 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 PARALLEL SUB-AGENTS (CRITICAL RULE):
 - NEVER use Agent with run_in_background=true inside this session.
   Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+  A harness hook enforces this: any run_in_background=true call is blocked automatically.
 - Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
   message. The harness runs them concurrently and waits for ALL to finish before continuing.
   You get full parallelism without losing results across session boundaries.
 - Do NOT end your turn until every sub-agent result has been received and integrated.
+- Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
+  folders, or agent-*.jsonl files. There are no orphaned background agents to find — the
+  harness hook blocks background agents before they can spawn.
 
 BEFORE EXITING (MANDATORY):
 
@@ -599,10 +603,14 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 PARALLEL SUB-AGENTS (CRITICAL RULE):
 - NEVER use Agent with run_in_background=true inside this session.
   Background agents are orphaned when the session forks — results are LOST, tokens wasted.
+  A harness hook enforces this: any run_in_background=true call is blocked automatically.
 - Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
   message. The harness runs them concurrently and waits for ALL to finish before continuing.
   You get full parallelism without losing results across session boundaries.
 - Do NOT end your turn until every sub-agent result has been received and integrated.
+- Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
+  folders, or agent-*.jsonl files. There are no orphaned background agents to find — the
+  harness hook blocks background agents before they can spawn.
 
 BEFORE EXITING (MANDATORY):
 

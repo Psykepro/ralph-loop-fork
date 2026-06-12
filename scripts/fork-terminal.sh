@@ -198,7 +198,7 @@ INIT_MSG="Read and execute the task in $PROMPT_FILE_ABS"
 # CRITICAL: Unset CLAUDECODE to prevent "cannot be launched inside another Claude Code session" error.
 # tmux sessions inherit env vars from the parent process, and CLAUDECODE causes Claude to
 # refuse to start, silently killing the forked session (discovered 2026-02-14).
-FORK_CMD="unset TMUX && unset CLAUDECODE && RALPH_LOOP_ACTIVE=1 claude --dangerously-skip-permissions '$INIT_MSG'"
+FORK_CMD="unset TMUX && unset CLAUDECODE && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions '$INIT_MSG'"
 
 # Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
 if [[ ! -d "$CWD" ]]; then
@@ -211,7 +211,7 @@ echo "Forking to new session: $SESSION_NAME"
 
 # Spawn detached tmux session
 # Must unset TMUX in the env to avoid "sessions should be nested with care" when spawning from inside tmux
-TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$CWD" "$FORK_CMD" 2>&1 || {
+TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$CWD" -e "RALPH_LOOP_ACTIVE=1" "$FORK_CMD" 2>&1 || {
   echo "Error: Failed to create tmux session $SESSION_NAME" >&2
   exit 1
 }
