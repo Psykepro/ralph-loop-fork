@@ -518,6 +518,16 @@ else
 }
 EOF
 
+  # W1: sentinel-guarded AEOS config generation — fail-open (W4)
+  AEOS_PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  if [[ -f "$AEOS_PROJECT_ROOT/.claude/scripts/ralph_aeos_config.py" ]]; then
+    if ! python3 "$AEOS_PROJECT_ROOT/.claude/scripts/ralph_aeos_config.py" \
+        --checklist "$CHECKLIST_FILE" \
+        --loop-dir "$LOOP_DIR" >&2; then
+      echo "⚠️  ralph_aeos_config.py exited non-zero — AEOS gates disabled (W4 fail-open)" >&2
+    fi
+  fi
+
   echo "${GRN_O}✅ Ralph Loop Fork activated: $LOOP_ID${RST_O}"
   echo ""
   echo "Loop ID: $LOOP_ID"
