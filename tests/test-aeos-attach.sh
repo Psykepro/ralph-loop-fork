@@ -633,6 +633,280 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SUB-04: Stop-hook evidence-marker gate tests
+# Tests 12–17 cover the marker gate added to the completion-promise path.
+# Tests 12 and 17 are RED before the patch; Tests 13–16 are GREEN stability guards.
+#
+# SA-4 observation: evidence-stop-gate.py is wired as a PRE-TOOL-USE hook
+# (not a stop hook). It fires on every tool use; the marker gate in
+# stop-hook-fork.sh fires only at session end when a promise is detected.
+# The two gates are independent event types — no deadlock, no double-block.
+# Sub-05 e2e will observe both firing in a real mini-loop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Build a stop-hook fixture for evidence-marker gate tests.
+# All checklist items are [x] and committed (passes the git dirty check).
+# Transcript contains <promise>DONE</promise> in last assistant message.
+# Params: dir loop_id markers_to_create required_markers marker_block_count
+#   markers_to_create : space-separated .evidence/ files to pre-create (e.g. "tested reviewed")
+#   required_markers  : JSON array literal (e.g. '["tested","reviewed"]' or '[]')
+#   marker_block_count: integer (default 0) — pre-seeded in state.json
+make_marker_fixture() {
+  local dir="$1" loop_id="$2"
+  local markers_to_create="${3:-}"
+  local required_markers="${4:-[\"tested\",\"reviewed\"]}"
+  local marker_block_count="${5:-0}"
+  local plan_dir="_project/progress/in-progress/test-plan"
+
+  mkdir -p "$dir/.claude/ralph-fork/$loop_id"
+  mkdir -p "$dir/$plan_dir"
+
+  cat > "$dir/$plan_dir/MASTER-CHECKLIST.md" <<'CLEOF'
+# Checklist
+- [x] Task A
+- [x] Task B
+CLEOF
+
+  cat > "$dir/$plan_dir/loop-state.json" <<'LSEOF'
+{"revision_budget": 5, "revision_count": 0}
+LSEOF
+
+  git -C "$dir" init -q -b main 2>/dev/null || true
+  git -C "$dir" config user.email t@t.local 2>/dev/null || true
+  git -C "$dir" config user.name t 2>/dev/null || true
+  git -C "$dir" add "$plan_dir/MASTER-CHECKLIST.md" "$plan_dir/loop-state.json" 2>/dev/null || true
+  git -C "$dir" commit -qm "fixture: committed all-x checklist" 2>/dev/null || true
+
+  if [[ -n "$markers_to_create" ]]; then
+    mkdir -p "$dir/$plan_dir/.evidence"
+    for marker in $markers_to_create; do
+      touch "$dir/$plan_dir/.evidence/$marker"
+    done
+  fi
+
+  cat > "$dir/.claude/ralph-fork/$loop_id/.aeos-config.json" <<ACEOF
+{
+  "schema_version": 1,
+  "plan_dir": "$plan_dir",
+  "doom_abort_threshold": 3,
+  "required_markers": $required_markers,
+  "respect_revision_budget": false
+}
+ACEOF
+
+  cat > "$dir/.claude/ralph-fork/$loop_id/state.json" <<STEOF
+{
+  "loop_id": "$loop_id",
+  "active": true,
+  "total_budget": 100,
+  "max_per_session": 1,
+  "total_iterations": 1,
+  "session_number": 2,
+  "session_token": "abc123",
+  "completion_promise": "DONE",
+  "prompt": "test",
+  "checklist_file": "$plan_dir/MASTER-CHECKLIST.md",
+  "on_completion_command": null,
+  "awaiting_checklist_update": false,
+  "awaiting_confirmation": false,
+  "executing_on_completion": false,
+  "awaiting_background_agents": false,
+  "bg_agent_block_count": 0,
+  "stuck_count": 0,
+  "last_checklist_hash": null,
+  "marker_block_count": $marker_block_count,
+  "spawned_sessions": []
+}
+STEOF
+
+  cat > "$dir/.claude/ralph-fork/$loop_id/local.md" <<LOEOF
+---
+loop_id: $loop_id
+active: true
+session_number: 2
+session_token: abc123
+iteration: 2
+max_per_session: 1
+completion_promise: "DONE"
+started_at: "2026-01-22T12:00:00Z"
+---
+
+test prompt
+LOEOF
+
+  mkdir -p "$dir/transcripts"
+  cat > "$dir/transcripts/$loop_id.jsonl" <<TREOF
+{"type":"user","message":{"role":"user","content":"RALPH LOOP CONTEXT (Loop: $loop_id, Session 2, Token: abc123): test"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Work done. <promise>DONE</promise>"}]}}
+TREOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 12 (sub-04a): required_markers non-empty + markers absent → marker BLOCK${NC}"
+# RED before patch: falls through to awaiting_confirmation=true (no marker gate).
+# After patch: BLOCK output names missing markers + exact mark.py commands.
+
+T12=$(mktemp -d -t aeos-t12-XXXX); _CLEANUP_DIRS+=("$T12")
+make_marker_fixture "$T12" "marker-t12" "" '["tested","reviewed"]' 0
+OUT12=$(run_stop_hook "$T12" "marker-t12" false)
+
+MBC12=$(state_field "$T12" "marker-t12" "marker_block_count")
+if [[ "$MBC12" == "1" ]]; then
+  pass "marker-absent: marker_block_count=1 after first block"
+else
+  fail "marker-absent: expected marker_block_count=1" "got: $MBC12"
+fi
+
+ACU12=$(state_field "$T12" "marker-t12" "awaiting_checklist_update")
+if [[ "$ACU12" == "true" ]]; then
+  pass "marker-absent: awaiting_checklist_update=true (loop will continue)"
+else
+  fail "marker-absent: expected awaiting_checklist_update=true" "got: $ACU12"
+fi
+
+if echo "$OUT12" | grep -q '"decision": "block"'; then
+  pass "marker-absent: decision=block"
+else
+  fail "marker-absent: expected decision=block in output" "$(echo "$OUT12" | tail -5)"
+fi
+
+if echo "$OUT12" | grep -q "mark.py tested"; then
+  pass "marker-absent: BLOCK reason contains 'mark.py tested' command"
+else
+  fail "marker-absent: BLOCK reason missing 'mark.py tested' command" "$(echo "$OUT12" | grep -i "mark\|tested" | head -3)"
+fi
+
+if echo "$OUT12" | grep -q "mark.py reviewed"; then
+  pass "marker-absent: BLOCK reason contains 'mark.py reviewed' command"
+else
+  fail "marker-absent: BLOCK reason missing 'mark.py reviewed' command" "$(echo "$OUT12" | grep -i "mark\|reviewed" | head -3)"
+fi
+
+if echo "$OUT12" | grep -q "tested.*reviewed\|reviewed.*tested\|Missing:"; then
+  pass "marker-absent: BLOCK reason names the missing markers"
+else
+  fail "marker-absent: BLOCK reason does not name missing markers" "$(echo "$OUT12" | grep -i "missing" | head -3)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 13 (sub-04b): all markers present → falls through to confirmation (GREEN stability guard)${NC}"
+# Edge case 7: markers written mid-session are visible at stop time (gate reads fs, not git).
+# GREEN both before and after patch.
+
+T13=$(mktemp -d -t aeos-t13-XXXX); _CLEANUP_DIRS+=("$T13")
+make_marker_fixture "$T13" "mkpresent-t13" "tested reviewed" '["tested","reviewed"]' 0
+OUT13=$(run_stop_hook "$T13" "mkpresent-t13" false)
+
+if [[ "$(state_field "$T13" "mkpresent-t13" "awaiting_confirmation")" == "true" ]]; then
+  pass "markers-present: awaiting_confirmation=true (reached confirmation step)"
+else
+  fail "markers-present: expected awaiting_confirmation=true" \
+    "awaiting_confirmation=$(state_field "$T13" "mkpresent-t13" "awaiting_confirmation")"
+fi
+
+if ! echo "$OUT13" | grep -q "EVIDENCE MARKERS MISSING\|Evidence markers missing"; then
+  pass "markers-present: no marker-gate BLOCK (fell through correctly)"
+else
+  fail "markers-present: unexpected marker-gate BLOCK fired despite markers being present" ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 14 (sub-04c): no config → promise path unchanged (GREEN stability guard)${NC}"
+# Absence of .aeos-config.json must leave the promise acceptance path byte-identical.
+
+T14=$(mktemp -d -t aeos-t14-XXXX); _CLEANUP_DIRS+=("$T14")
+make_marker_fixture "$T14" "noconfig-t14" "" '[]' 0
+# Remove .aeos-config.json (make_marker_fixture always creates it)
+rm -f "$T14/.claude/ralph-fork/noconfig-t14/.aeos-config.json"
+OUT14=$(run_stop_hook "$T14" "noconfig-t14" false)
+
+if [[ "$(state_field "$T14" "noconfig-t14" "awaiting_confirmation")" == "true" ]]; then
+  pass "no-config: awaiting_confirmation=true (promise path unchanged)"
+else
+  fail "no-config: expected awaiting_confirmation=true" \
+    "awaiting_confirmation=$(state_field "$T14" "noconfig-t14" "awaiting_confirmation")"
+fi
+
+MBC14=$(state_field "$T14" "noconfig-t14" "marker_block_count")
+if [[ "$MBC14" == "0" || "$MBC14" == "null" ]]; then
+  pass "no-config: marker_block_count unchanged (no gate fired)"
+else
+  fail "no-config: marker_block_count modified despite no config" "got: $MBC14"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 15 (sub-04d): corrupt .aeos-config.json in promise path → fail-open (GREEN stability guard)${NC}"
+# W4: parse error on required_markers must fall through to confirmation, never terminate.
+
+T15=$(mktemp -d -t aeos-t15-XXXX); _CLEANUP_DIRS+=("$T15")
+make_marker_fixture "$T15" "corrupt-t15" "" '["tested","reviewed"]' 0
+printf 'NOT_VALID_JSON{{{' > "$T15/.claude/ralph-fork/corrupt-t15/.aeos-config.json"
+OUT15=$(run_stop_hook "$T15" "corrupt-t15" false)
+
+if [[ "$(state_field "$T15" "corrupt-t15" "active")" != "false" ]]; then
+  pass "corrupt-config: fail-open — loop not terminated"
+else
+  fail "corrupt-config (promise path): W4 VIOLATED — loop terminated on corrupt config" ""
+fi
+
+if [[ "$(state_field "$T15" "corrupt-t15" "awaiting_confirmation")" == "true" ]]; then
+  pass "corrupt-config: awaiting_confirmation=true (fell through, no marker block)"
+else
+  fail "corrupt-config: expected fall-through to confirmation" \
+    "awaiting_confirmation=$(state_field "$T15" "corrupt-t15" "awaiting_confirmation")"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 16 (sub-04e): required_markers=[] → promise path unchanged (GREEN stability guard)${NC}"
+# Empty required_markers array must behave identically to no config (skip gate).
+
+T16=$(mktemp -d -t aeos-t16-XXXX); _CLEANUP_DIRS+=("$T16")
+make_marker_fixture "$T16" "emptymk-t16" "" '[]' 0
+OUT16=$(run_stop_hook "$T16" "emptymk-t16" false)
+
+if [[ "$(state_field "$T16" "emptymk-t16" "awaiting_confirmation")" == "true" ]]; then
+  pass "empty-markers: awaiting_confirmation=true (empty list skips gate)"
+else
+  fail "empty-markers: expected awaiting_confirmation=true" \
+    "awaiting_confirmation=$(state_field "$T16" "emptymk-t16" "awaiting_confirmation")"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 17 (sub-04f): marker_block_count ≥ 3 → escalation message with add-revision${NC}"
+# RED before patch: marker_block_count not incremented, no escalation message.
+# After patch: pre-seeded count=2 → fires → count becomes 3 → escalation appended.
+
+T17=$(mktemp -d -t aeos-t17-XXXX); _CLEANUP_DIRS+=("$T17")
+make_marker_fixture "$T17" "escalate-t17" "" '["tested","reviewed"]' 2
+OUT17=$(run_stop_hook "$T17" "escalate-t17" false)
+
+MBC17=$(state_field "$T17" "escalate-t17" "marker_block_count")
+if [[ "$MBC17" == "3" ]]; then
+  pass "escalation: marker_block_count=3 after third block"
+else
+  fail "escalation: expected marker_block_count=3" "got: $MBC17"
+fi
+
+if echo "$OUT17" | grep -q "add-revision"; then
+  pass "escalation: BLOCK reason contains 'add-revision' escalation at count=3"
+else
+  fail "escalation: expected 'add-revision' in BLOCK reason at count=3" \
+    "$(echo "$OUT17" | grep -i "revision\|escalat" | head -3)"
+fi
+
+if echo "$OUT17" | grep -q "mark.py tested\|mark.py reviewed"; then
+  pass "escalation: mark.py instructions still present alongside escalation"
+else
+  fail "escalation: mark.py instructions missing from escalated BLOCK" ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
 echo "Test Results"
