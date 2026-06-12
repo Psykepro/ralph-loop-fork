@@ -430,6 +430,37 @@ tail -f "${RALPH_FORK_LOG_DIR:-/tmp/ralph-fork-logs}/ralph-fork-$(date +%Y-%m-%d
 
 ---
 
+## AEOS integration (optional)
+
+ralph-loop-fork has optional integration with [AEOS (Agentic Engineering OS)](https://github.com/Psykepro/agentic-coding-ready-now) that activates automatically when `.claude/scripts/ralph_aeos_config.py` is present in the project root.
+
+### How it activates
+
+At loop launch (`setup-ralph-loop-fork.sh`), if `ralph_aeos_config.py` exists, it is called with the checklist path and loop directory. It writes `.aeos-config.json` to the loop state directory. If the script fails or is absent, the loop proceeds normally with no AEOS gates — **fail-open by design** (W4 guarantee: standalone behavior is always preserved).
+
+### .aeos-config.json fields
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `doom_abort_threshold` | int | Consecutive iterations with no checklist change before termination (default: 3) |
+| `respect_revision_budget` | bool | Whether to enforce `revision_budget` from `loop-state.json` |
+| `required_markers` | list[str] | Evidence marker names that must exist before the completion promise is accepted |
+| `plan_dir` | str | Path to the evidence directory (`.evidence/`) relative to AEOS project root |
+
+### AEOS-controlled termination modes
+
+**Doom-loop detection**: If the checklist file content (hash) is unchanged across `doom_abort_threshold` consecutive forks, the loop terminates and writes `BLOCKER.md` to the loop directory with `termination_reason: doom_loop_detected`. This prevents stuck loops from running indefinitely.
+
+**Revision-budget exhaustion**: If `respect_revision_budget` is true and `loop-state.json:revision_count >= revision_budget`, the loop terminates with `termination_reason: revision_budget_exhausted`. The budget is set at loop launch via `--total-budget`.
+
+**Required-markers gate**: Before accepting a completion promise from the agent, the stop hook checks that all `required_markers` exist in the plan's `.evidence/` directory. If any are missing, the session is re-forked with instructions to write the missing markers (via `python .claude/scripts/mark.py`). The agent cannot exit the loop without all required evidence.
+
+### Non-AEOS projects
+
+None of these behaviors activate without `.aeos-config.json`. If you install ralph-loop-fork in a project that does not use AEOS, you will never see doom-loop termination, revision-budget exhaustion, or the marker gate. The `BLOCKER.md` file only appears in AEOS-managed loops.
+
+---
+
 ## Comparison with standard ralph-loop
 
 | Feature | `/ralph-loop` | `/ralph-loop-fork` |
