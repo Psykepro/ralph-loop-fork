@@ -1,6 +1,18 @@
 {
-  "description": "Ralph Loop Fork plugin hooks - forks to new terminal on stop",
+  "description": "Ralph Loop Fork plugin hooks - forks to new terminal on stop, blocks background agents",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/block-background-agents.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
