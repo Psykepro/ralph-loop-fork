@@ -1101,6 +1101,104 @@ if [[ $BG_PENDING -gt 0 ]]; then
 fi
 
 # ============================================================================
+# AEOS DOOM-LOOP + REVISION-BUDGET CHECK
+# Active only when .aeos-config.json exists in LOOP_DIR (W4 fail-open on read).
+# Doom increment gated on STOP_HOOK_ACTIVE=false: one sample per fork, not per
+# hook fire (hook fires twice per fork in the normal path).
+# All jq reads fail-open: parse error → debug_log + proceed as v0.1.6.
+# ============================================================================
+AEOS_CONFIG_FILE="$LOOP_DIR/.aeos-config.json"
+if [[ -f "$AEOS_CONFIG_FILE" ]]; then
+  debug_log "AEOS: config found at $AEOS_CONFIG_FILE"
+
+  # Read config fields (fail-open on any parse/jq error)
+  AEOS_DOOM_THRESHOLD=0
+  AEOS_RESPECT_REVISION=false
+  AEOS_PLAN_DIR=""
+  AEOS_DOOM_THRESHOLD=$(jq -r '.doom_abort_threshold // 0' "$AEOS_CONFIG_FILE" 2>/dev/null) || AEOS_DOOM_THRESHOLD=0
+  AEOS_RESPECT_REVISION=$(jq -r '.respect_revision_budget // false' "$AEOS_CONFIG_FILE" 2>/dev/null) || AEOS_RESPECT_REVISION=false
+  AEOS_PLAN_DIR=$(jq -r '.plan_dir // ""' "$AEOS_CONFIG_FILE" 2>/dev/null) || AEOS_PLAN_DIR=""
+
+  # ── Doom-loop detection ──────────────────────────────────────────────────
+  # Gate on STOP_HOOK_ACTIVE=false: count once per fork, not per hook fire.
+  if [[ "$STOP_HOOK_ACTIVE" == "false" ]] && [[ "$AEOS_DOOM_THRESHOLD" -gt 0 ]]; then
+    CURRENT_HASH=""
+    if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+      CURRENT_HASH=$(md5 -q "$CHECKLIST_PATH" 2>/dev/null || \
+                    md5sum "$CHECKLIST_PATH" 2>/dev/null | awk '{print $1}') || CURRENT_HASH=""
+    fi
+
+    if [[ -n "$CURRENT_HASH" ]]; then
+      LAST_HASH=$(jq -r '.last_checklist_hash // ""' "$STATE_FILE" 2>/dev/null) || LAST_HASH=""
+      STUCK_COUNT=$(jq -r '.stuck_count // 0' "$STATE_FILE" 2>/dev/null) || STUCK_COUNT=0
+
+      if [[ "$CURRENT_HASH" == "$LAST_HASH" ]]; then
+        NEW_STUCK_COUNT=$((STUCK_COUNT + 1))
+        debug_log "AEOS doom-loop: hash unchanged ($CURRENT_HASH), stuck_count=$NEW_STUCK_COUNT/$AEOS_DOOM_THRESHOLD"
+
+        if [[ $NEW_STUCK_COUNT -ge $AEOS_DOOM_THRESHOLD ]]; then
+          info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP DETECTED — checklist unchanged for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD)."
+          info ""
+
+          cat > "$PROJECT_ROOT/BLOCKER.md" <<BLOCKER_EOF
+# BLOCKER
+
+**Condition:** doom-loop-detected
+**Detail:** Checklist hash unchanged for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD). Loop ID: $LOOP_ID, plan_dir: ${AEOS_PLAN_DIR:-unknown}.
+**Fix:** Review the checklist and the last session transcript. Identify why progress has stalled, fix the underlying issue, then remove this file and re-run the loop.
+BLOCKER_EOF
+
+          update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_checklist_hash = \"$CURRENT_HASH\" | .termination_reason = \"doom_loop_detected\""
+          debug_log "AEOS doom-loop: spawning detached cleanup"
+          run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+          exit 0
+        else
+          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_checklist_hash = \"$CURRENT_HASH\""
+        fi
+      else
+        debug_log "AEOS doom-loop: hash changed (${LAST_HASH:-none} → $CURRENT_HASH), resetting stuck_count"
+        update_state "$STATE_FILE" ".stuck_count = 0 | .last_checklist_hash = \"$CURRENT_HASH\""
+      fi
+    fi
+  fi
+
+  # ── Revision-budget check ────────────────────────────────────────────────
+  if [[ "$AEOS_RESPECT_REVISION" == "true" ]] && [[ -n "$AEOS_PLAN_DIR" ]]; then
+    LOOP_STATE_FILE="$PROJECT_ROOT/$AEOS_PLAN_DIR/loop-state.json"
+    if [[ -f "$LOOP_STATE_FILE" ]]; then
+      AEOS_REVISION_BUDGET=$(jq -r '.revision_budget // 0' "$LOOP_STATE_FILE" 2>/dev/null) || AEOS_REVISION_BUDGET=0
+      AEOS_REVISION_COUNT=$(jq -r '.revision_count // 0' "$LOOP_STATE_FILE" 2>/dev/null) || AEOS_REVISION_COUNT=0
+
+      if [[ "$AEOS_REVISION_BUDGET" -gt 0 ]] && [[ "$AEOS_REVISION_COUNT" -ge "$AEOS_REVISION_BUDGET" ]]; then
+        info "Ralph Loop Fork [$LOOP_ID]: REVISION BUDGET EXHAUSTED — revision_count ($AEOS_REVISION_COUNT) >= revision_budget ($AEOS_REVISION_BUDGET)."
+        info ""
+
+        cat > "$PROJECT_ROOT/BLOCKER.md" <<BLOCKER_EOF
+# BLOCKER
+
+**Condition:** revision-budget-exhausted
+**Detail:** revision_count=$AEOS_REVISION_COUNT >= revision_budget=$AEOS_REVISION_BUDGET in $AEOS_PLAN_DIR/loop-state.json. Loop ID: $LOOP_ID.
+**Fix:** Review the revision history in loop-state.json, resolve the blocking issue, then bump revision_budget and remove this file before re-running the loop.
+BLOCKER_EOF
+
+        update_state "$STATE_FILE" ".active = false | .termination_reason = \"revision_budget_exhausted\""
+        debug_log "AEOS revision budget: spawning detached cleanup"
+        run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+        exit 0
+      else
+        debug_log "AEOS revision budget: $AEOS_REVISION_COUNT/$AEOS_REVISION_BUDGET"
+      fi
+    else
+      debug_log "AEOS revision budget: loop-state.json not found at $LOOP_STATE_FILE"
+    fi
+  else
+    debug_log "AEOS revision budget: disabled (respect_revision_budget=$AEOS_RESPECT_REVISION)"
+  fi
+else
+  debug_log "AEOS: no config at $AEOS_CONFIG_FILE — standalone mode, no state changes"
+fi
+
+# ============================================================================
 # READ LAST ASSISTANT MESSAGE
 # ============================================================================
 if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null; then
