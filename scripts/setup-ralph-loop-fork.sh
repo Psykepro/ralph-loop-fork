@@ -735,7 +735,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   # Launch the initial Claude session inside the worktree.
   SESSION_NAME="ralph-$LOOP_ID-1"
   INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
-  FORK_CMD="unset CLAUDECODE; claude --dangerously-skip-permissions '$INIT_MSG'"
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.
