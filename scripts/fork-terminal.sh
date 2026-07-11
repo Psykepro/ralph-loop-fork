@@ -56,6 +56,8 @@ COMPLETION_PROMISE=$(jq -r '.completion_promise' "$STATE_FILE")
 CHECKLIST_PATH=$(jq -r '.checklist_file // ""' "$STATE_FILE")
 COMMAND=$(jq -r '.command // ""' "$STATE_FILE")
 STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE")
+MODEL=$(jq -r '.model // ""' "$STATE_FILE")
+[[ "$MODEL" == "null" ]] && MODEL=""
 
 # Resolve CHECKLIST_PATH to absolute so forked sessions launched from any CWD can expand @
 if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECKLIST_PATH" != /* ]]; then
@@ -198,7 +200,13 @@ INIT_MSG="Read and execute the task in $PROMPT_FILE_ABS"
 # CRITICAL: Unset CLAUDECODE to prevent "cannot be launched inside another Claude Code session" error.
 # tmux sessions inherit env vars from the parent process, and CLAUDECODE causes Claude to
 # refuse to start, silently killing the forked session (discovered 2026-02-14).
-FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions '$INIT_MSG'"
+# Optional model pinning: persisted in state.json by setup --model (charset
+# validated there since the value is interpolated into this shell command).
+MODEL_FLAG=""
+if [[ -n "$MODEL" ]]; then
+  MODEL_FLAG=" --model $MODEL"
+fi
+FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG '$INIT_MSG'"
 
 # Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
 if [[ ! -d "$CWD" ]]; then
