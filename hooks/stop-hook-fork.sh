@@ -261,7 +261,7 @@ cleanup_current_session() {
   local session_name="ralph-${loop_id}-${session_number}"
   debug_log "Cleaning up current session: $session_name"
 
-  if tmux kill-session -t "$session_name" 2>/dev/null; then
+  if tmux kill-session -t "=$session_name" 2>/dev/null; then
     info "   Removed previous session: $session_name"
     return 0
   else
@@ -311,7 +311,7 @@ cleanup_ralph_sessions() {
       info "   Preserving original session: $original_session (--preserve-final-session, no forks)"
     else
       debug_log "No forks occurred - removing original session: $original_session"
-      if tmux kill-session -t "$original_session" 2>/dev/null; then
+      if tmux kill-session -t "=$original_session" 2>/dev/null; then
         info "   Removed original session: $original_session"
         debug_log "Successfully removed original: $original_session"
       else
@@ -339,7 +339,7 @@ cleanup_ralph_sessions() {
         continue
       fi
       debug_log "Removing session: $session_name"
-      if tmux kill-session -t "$session_name" 2>/dev/null; then
+      if tmux kill-session -t "=$session_name" 2>/dev/null; then
         info "   Removed: $session_name"
         debug_log "Successfully removed: $session_name"
       else
@@ -351,7 +351,7 @@ cleanup_ralph_sessions() {
   # Also remove the original session (if not preserved and forks occurred)
   if [[ -n "$original_session" ]] && [[ "$preserve_final" != "true" ]]; then
     debug_log "Removing original session: $original_session"
-    if tmux kill-session -t "$original_session" 2>/dev/null; then
+    if tmux kill-session -t "=$original_session" 2>/dev/null; then
       info "   Removed original: $original_session"
     else
       debug_log "Original session already removed or not found: $original_session"
@@ -485,7 +485,7 @@ else
           continue
         fi
         log "Removing session: $session_name"
-        if tmux kill-session -t "$session_name" 2>/dev/null; then
+        if tmux kill-session -t "=$session_name" 2>/dev/null; then
           log "Removed: $session_name"
         else
           log "Failed to remove or not found: $session_name"
@@ -496,7 +496,7 @@ else
     # NEW: Remove original session if preserving final and spawned sessions exist
     if [[ "$PRESERVE_FINAL" == "true" ]] && [[ -n "$ORIGINAL_SESSION" ]] && [[ -n "$LAST_SESSION" ]]; then
       log "Removing original session (launcher): $ORIGINAL_SESSION"
-      if tmux kill-session -t "$ORIGINAL_SESSION" 2>/dev/null; then
+      if tmux kill-session -t "=$ORIGINAL_SESSION" 2>/dev/null; then
         log "Removed original session: $ORIGINAL_SESSION"
       else
         log "Failed to remove original session (may not exist): $ORIGINAL_SESSION"
@@ -506,7 +506,7 @@ else
     # Remove original session if not preserving (cleanup all mode)
     if [[ -n "$ORIGINAL_SESSION" ]] && [[ "$PRESERVE_FINAL" != "true" ]]; then
       log "Removing original session (no-preserve mode): $ORIGINAL_SESSION"
-      if tmux kill-session -t "$ORIGINAL_SESSION" 2>/dev/null; then
+      if tmux kill-session -t "=$ORIGINAL_SESSION" 2>/dev/null; then
         log "Removed original: $ORIGINAL_SESSION"
       else
         log "Original already removed or not found: $ORIGINAL_SESSION"
