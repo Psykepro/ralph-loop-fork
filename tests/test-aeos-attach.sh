@@ -310,7 +310,7 @@ STOP_HOOK="$SCRIPT_DIR/hooks/stop-hook-fork.sh"
 
 # Build a minimal stop-hook fixture in DIR for LOOP_ID.
 # Params: dir loop_id stuck_count last_hash revision_count revision_budget
-#         doom_threshold respect_revision
+#         doom_threshold respect_revision total_budget with_signals_dir
 make_stop_fixture() {
   local dir="$1" loop_id="$2"
   local stuck_count="${3:-0}"
@@ -319,9 +319,14 @@ make_stop_fixture() {
   local revision_budget="${6:-5}"
   local doom_threshold="${7:-3}"
   local respect_revision="${8:-true}"
+  local total_budget="${9:-100}"
+  local with_signals_dir="${10:-true}"
 
   mkdir -p "$dir/.claude/ralph-fork/$loop_id"
   mkdir -p "$dir/_project/progress/in-progress/test-plan"
+  if [[ "$with_signals_dir" == "true" ]]; then
+    mkdir -p "$dir/_project/signals"
+  fi
 
   cat > "$dir/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md" <<'CLEOF'
 # Checklist
@@ -354,7 +359,7 @@ ACEOF
 {
   "loop_id": "$loop_id",
   "active": true,
-  "total_budget": 100,
+  "total_budget": $total_budget,
   "max_per_session": 1,
   "total_iterations": 1,
   "session_number": 2,
@@ -904,6 +909,116 @@ if echo "$OUT17" | grep -q "mark.py tested\|mark.py reviewed"; then
   pass "escalation: mark.py instructions still present alongside escalation"
 else
   fail "escalation: mark.py instructions missing from escalated BLOCK" ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUB-03: Signal-bus emission tests (self-improving-os WP-03)
+# events.jsonl row helper: last line, parsed with jq.
+# ─────────────────────────────────────────────────────────────────────────────
+last_event() {
+  local dir="$1" field="$2"
+  tail -1 "$dir/_project/signals/events.jsonl" 2>/dev/null | jq -r "$field" 2>/dev/null || echo "null"
+}
+
+echo ""
+echo -e "${YELLOW}Test 18 (sub-03-signal-a): Doom-loop → events.jsonl row kind=ralph-doomed${NC}"
+
+T18=$(mktemp -d -t aeos-t18-XXXX); _CLEANUP_DIRS+=("$T18")
+_tmp18=$(mktemp)
+printf '# Checklist\n- [ ] Task A\n- [ ] Task B\n' > "$_tmp18"
+CL_HASH18=$(checklist_hash "$_tmp18")
+rm -f "$_tmp18"
+make_stop_fixture "$T18" "doom-t18" 2 "$CL_HASH18" 0 5 3 false
+OUT18=$(run_stop_hook "$T18" "doom-t18" false)
+
+if [[ -f "$T18/_project/signals/events.jsonl" ]]; then
+  pass "signal: events.jsonl written on doom-loop"
+else
+  fail "signal: events.jsonl missing after doom-loop" ""
+fi
+
+if [[ "$(last_event "$T18" '.kind')" == "ralph-doomed" ]]; then
+  pass "signal: doom-loop row kind=ralph-doomed"
+else
+  fail "signal: expected kind=ralph-doomed" "got: $(last_event "$T18" '.kind')"
+fi
+
+if [[ "$(last_event "$T18" '.payload.reason')" == "doom_loop_detected" ]]; then
+  pass "signal: doom-loop row payload.reason=doom_loop_detected"
+else
+  fail "signal: expected payload.reason=doom_loop_detected" "got: $(last_event "$T18" '.payload.reason')"
+fi
+
+if [[ "$(last_event "$T18" '.session')" == "doom-t18" ]]; then
+  pass "signal: doom-loop row session=loop_id"
+else
+  fail "signal: expected session=doom-t18" "got: $(last_event "$T18" '.session')"
+fi
+
+if echo "$OUT18" | grep -q "terminalSequence"; then
+  pass "signal: doom-loop hook output contains terminalSequence"
+else
+  fail "signal: expected terminalSequence in doom-loop output" "$OUT18"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 19 (sub-03-signal-b): Revision budget exhausted → events.jsonl row kind=ralph-doomed${NC}"
+
+T19=$(mktemp -d -t aeos-t19-XXXX); _CLEANUP_DIRS+=("$T19")
+make_stop_fixture "$T19" "rev-t19" 0 "" 3 3 5 true
+run_stop_hook "$T19" "rev-t19" false >/dev/null
+
+if [[ "$(last_event "$T19" '.kind')" == "ralph-doomed" ]]; then
+  pass "signal: revision-budget row kind=ralph-doomed"
+else
+  fail "signal: expected kind=ralph-doomed" "got: $(last_event "$T19" '.kind')"
+fi
+
+if [[ "$(last_event "$T19" '.payload.reason')" == "revision_budget_exhausted" ]]; then
+  pass "signal: revision-budget row payload.reason=revision_budget_exhausted"
+else
+  fail "signal: expected payload.reason=revision_budget_exhausted" \
+    "got: $(last_event "$T19" '.payload.reason')"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 20 (sub-03-signal-c): Budget exhausted → events.jsonl row kind=ralph-budget-exhausted${NC}"
+
+T20=$(mktemp -d -t aeos-t20-XXXX); _CLEANUP_DIRS+=("$T20")
+make_stop_fixture "$T20" "budget-t20" 0 "" 0 5 3 false 1
+run_stop_hook "$T20" "budget-t20" false >/dev/null
+
+if [[ "$(last_event "$T20" '.kind')" == "ralph-budget-exhausted" ]]; then
+  pass "signal: budget-exhausted row kind=ralph-budget-exhausted"
+else
+  fail "signal: expected kind=ralph-budget-exhausted" "got: $(last_event "$T20" '.kind')"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 21 (sub-03-signal-d): non-AEOS repo (no _project/signals/) → no write, no error${NC}"
+
+T21=$(mktemp -d -t aeos-t21-XXXX); _CLEANUP_DIRS+=("$T21")
+_tmp21=$(mktemp)
+printf '# Checklist\n- [ ] Task A\n- [ ] Task B\n' > "$_tmp21"
+CL_HASH21=$(checklist_hash "$_tmp21")
+rm -f "$_tmp21"
+make_stop_fixture "$T21" "doom-t21" 2 "$CL_HASH21" 0 5 3 false 100 false
+OUT21=$(run_stop_hook "$T21" "doom-t21" false)
+
+if [[ ! -d "$T21/_project/signals" ]] && [[ ! -f "$T21/_project/signals/events.jsonl" ]]; then
+  pass "signal: no _project/signals/ dir created in non-AEOS repo (fail-open no-op)"
+else
+  fail "signal: unexpectedly created _project/signals/ in non-AEOS repo" ""
+fi
+
+if [[ "$(state_field "$T21" "doom-t21" "termination_reason")" == "doom_loop_detected" ]]; then
+  pass "signal: doom-loop still terminates correctly without signals dir"
+else
+  fail "signal: doom-loop termination broken by missing signals dir" \
+    "got: $(state_field "$T21" "doom-t21" "termination_reason")"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

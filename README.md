@@ -273,6 +273,7 @@ in the loop's `state.json`.
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree (only with `--worktree`) |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name for the worktree (only with `--worktree`) |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy into the worktree, space-separated inside one quoted arg |
+| `--model <name>` | inherit | Pin the Claude model for all spawned sessions (e.g. `sonnet`). Non-worktree mode: iteration 1 keeps the invoking session's model; forks use `--model` |
 
 Forked sessions always launch with `claude --dangerously-skip-permissions`.
 
@@ -459,6 +460,15 @@ At loop launch (`setup-ralph-loop-fork.sh`), if `ralph_aeos_config.py` exists, i
 
 None of these behaviors activate without `.aeos-config.json`. If you install ralph-loop-fork in a project that does not use AEOS, you will never see doom-loop termination, revision-budget exhaustion, or the marker gate. The `BLOCKER.md` file only appears in AEOS-managed loops.
 
+### Signals (optional, AEOS integration)
+
+On every loop termination — completion (with or without `--on-completion`, checklist moved away, or an orphaned-session recovery), doom-loop detection, revision-budget exhaustion, or total-budget exhaustion — the stop hook does two things, independent of each other and of everything above:
+
+1. **Appends one row** to `$PROJECT_ROOT/_project/signals/events.jsonl` with `kind` `ralph-completed`, `ralph-doomed`, or `ralph-budget-exhausted` (schema: [AEOS's `signals-protocol` rule](https://github.com/Psykepro/agentic-coding-ready-now)). Only runs if `_project/signals/` already exists — **no-op, no error** in any project that doesn't have it (same fail-open sentinel pattern as the AEOS config above).
+2. **Emits a `terminalSequence` desktop notification** (OSC 777) in the hook's JSON output — works in any terminal that supports it, independent of the AEOS signal bus.
+
+Neither behavior requires `.aeos-config.json` — the signals-dir check and the notification are both unconditional, so even a standalone install gets the desktop notification on completion/doom/budget-exhaustion.
+
 ---
 
 ## Comparison with standard ralph-loop
@@ -497,6 +507,7 @@ None of these behaviors activate without `.aeos-config.json`. If you install ral
 ```bash
 bash tests/test-state-tracking.sh
 bash tests/test-stop-hook-states.sh
+bash tests/test-aeos-attach.sh   # AEOS integration + signals emission
 ```
 
 ---

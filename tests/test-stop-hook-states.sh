@@ -10,6 +10,15 @@ TEST_DIR=$(mktemp -d)
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK_SCRIPT="$SCRIPT_DIR/hooks/stop-hook-fork.sh"
 
+# self-improving-os WP-03: PROJECT_ROOT (=TEST_DIR here) has _project/signals/
+# so every termination path in this file also exercises emit_signal() —
+# harmless for tests that don't assert on it, and lets specific tests below
+# assert the row was written.
+mkdir -p "$TEST_DIR/_project/signals"
+last_event_field() {
+  tail -1 "$TEST_DIR/_project/signals/events.jsonl" 2>/dev/null | jq -r "$1" 2>/dev/null || echo "null"
+}
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -393,6 +402,38 @@ test_awaiting_checklist_update() {
 }
 
 # -----------------------------------------------------------------------------
+# Test 6b (self-improving-os WP-03): checklist file moved/deleted → complete + signal
+# -----------------------------------------------------------------------------
+test_checklist_moved() {
+  echo -e "${YELLOW}Test 6b: checklist file missing → loop complete, ralph-completed signal${NC}"
+
+  local loop_id="test-checklist-moved"
+  local transcript_file=$(setup_test_env "$loop_id" "checklist_moved_test")
+
+  create_state_file "$loop_id" 100 1 true false false "" "$TEST_DIR/nonexistent-checklist.md"
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "Checklist was moved to done/"
+
+  local output=$(run_hook "$transcript_file" true)
+
+  assert_contains "moved/deleted" "$output" "Output mentions checklist moved/deleted"
+  assert_state_flag "$loop_id" "active" "false" "Loop marked inactive"
+  assert_state_flag "$loop_id" "termination_reason" "checklist_moved" "termination_reason=checklist_moved"
+  assert_contains "terminalSequence" "$output" "checklist-moved completion emits terminalSequence"
+  if [[ "$(last_event_field '.kind')" == "ralph-completed" ]] && \
+     [[ "$(last_event_field '.payload.termination_reason')" == "checklist_moved" ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: signal: checklist-moved row kind=ralph-completed reason=checklist_moved"
+  else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: signal: expected ralph-completed/checklist_moved"
+    echo "  got kind=$(last_event_field '.kind') reason=$(last_event_field '.payload.termination_reason')"
+  fi
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
 # Test 7: Promise found → set awaiting_confirmation
 # -----------------------------------------------------------------------------
 test_promise_found() {
@@ -516,6 +557,16 @@ test_stale_executing_on_completion() {
   fi
   assert_state_flag "$loop_id" "active" "false" "Loop marked inactive by stale detector"
   assert_state_flag "$loop_id" "termination_reason" "orphaned_executing_on_completion" "Stale termination reason set"
+  assert_contains "terminalSequence" "$output" "Stale recovery emits terminalSequence notification"
+  if [[ "$(last_event_field '.kind')" == "ralph-completed" ]] && \
+     [[ "$(last_event_field '.payload.termination_reason')" == "orphaned_executing_on_completion" ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: signal: orphaned-recovery row kind=ralph-completed reason=orphaned_executing_on_completion"
+  else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: signal: expected ralph-completed/orphaned_executing_on_completion"
+    echo "  got kind=$(last_event_field '.kind') reason=$(last_event_field '.payload.termination_reason')"
+  fi
 
   echo ""
 }
@@ -794,6 +845,7 @@ test_confirmation_success_with_on_completion
 test_confirmation_with_missing_boxes
 test_confirmation_no_tag
 test_awaiting_checklist_update
+test_checklist_moved
 test_promise_found
 test_no_promise
 test_promise_with_unchecked_items

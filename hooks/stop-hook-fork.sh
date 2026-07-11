@@ -62,6 +62,58 @@ debug_log() {
 }
 
 # ============================================================================
+# SIGNAL BUS EMISSION (self-improving-os WP-03)
+# Appends one row to $PROJECT_ROOT/_project/signals/events.jsonl — schema is
+# SSOT'd at _project/rules/signals-protocol/signals-protocol.md. Fail-open +
+# only when the dir exists: the plugin must behave byte-identically in
+# non-AEOS repos (no _project/signals/ dir → no-op, same as the AEOS config
+# sentinel pattern used elsewhere in this file). Mirrors aeos-watch.py's own
+# append_event() write shape exactly (single "a"-mode write() call = one
+# O_APPEND-atomic line, per the multi-writer discipline the schema mandates)
+# so both writers stay byte-compatible without sharing code across repos.
+# Called only from PROJECT_ROOT/LOOP_ID being already resolved.
+# ============================================================================
+emit_signal() {
+  local kind="$1" payload_json="${2:-{\}}"
+  local signals_dir="$PROJECT_ROOT/_project/signals"
+  [[ -d "$signals_dir" ]] || return 0
+  python3 -c '
+import json, sys
+from datetime import datetime, timezone
+
+kind, session, payload_json, events_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    payload = json.loads(payload_json)
+except json.JSONDecodeError:
+    payload = {}
+row = {
+    "ts": datetime.now(timezone.utc).isoformat(),
+    "kind": kind, "source": "ralph-loop-fork", "session": session,
+    "payload": payload,
+}
+try:
+    with open(events_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+except OSError:
+    pass
+' "$kind" "$LOOP_ID" "$payload_json" "$signals_dir/events.jsonl" 2>/dev/null || true
+}
+
+# ============================================================================
+# TERMINAL NOTIFICATION (self-improving-os WP-03)
+# Builds an OSC 777 escape sequence for the harness-native `terminalSequence`
+# hook JSON output field (urxvt/Ghostty/Warp desktop notification; verified
+# against the Claude Code hooks reference — allowlisted escape, terminated
+# with BEL). Call sites print `{"terminalSequence": "<seq>"}` to stdout
+# themselves (kept one line, no extra helper, per spec constraint 9's DRY
+# split — aeos_notify.py in the main AEOS repo owns the richer notify path).
+# ============================================================================
+build_terminal_sequence() {
+  local title="$1" body="$2"
+  printf '\033]777;notify;%s;%s\007' "$title" "$body"
+}
+
+# ============================================================================
 # CHECKLIST COUNTING FUNCTION
 # ============================================================================
 count_checklist_items() {
@@ -880,6 +932,10 @@ if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
 
     update_state "$STATE_FILE" ".active = false | .executing_on_completion = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"orphaned_executing_on_completion\""
 
+    emit_signal "ralph-completed" "$(jq -nc --arg reason "orphaned_executing_on_completion" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+    SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete (recovered orphaned session)")
+    jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
     debug_log "STALE-STATE: Spawning detached cleanup for orphaned loop"
     run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
     debug_log "STALE-STATE: Detached cleanup spawned, exiting"
@@ -932,6 +988,10 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
 
       update_state "$STATE_FILE" ".active = false | .awaiting_checklist_update = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"checklist_moved\""
 
+      emit_signal "ralph-completed" "$(jq -nc --arg reason "checklist_moved" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+      SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — checklist moved to done/")
+      jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
       debug_log "Spawning detached cleanup process..."
       run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
       debug_log "Detached cleanup spawned, exiting hook"
@@ -968,6 +1028,10 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     info ""
 
     update_state "$STATE_FILE" ".active = false | .executing_on_completion = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"on_completion_executed\""
+
+    emit_signal "ralph-completed" "$(jq -nc --arg reason "on_completion_executed" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+    SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
+    jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
 
     debug_log "Spawning detached cleanup process..."
     run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
@@ -1043,6 +1107,10 @@ if [[ $TOTAL_BUDGET -gt 0 ]] && [[ $NEW_TOTAL_ITERATIONS -gt $TOTAL_BUDGET ]]; t
 
   update_state "$STATE_FILE" ".active = false | .budget_exhausted = true | .exhausted_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"budget_exhausted\""
 
+  emit_signal "ralph-budget-exhausted" "$(jq -nc --argjson budget "$TOTAL_BUDGET" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$NEW_TOTAL_ITERATIONS" '{total_budget: $budget, sessions_used: $sessions, total_iterations: $iterations}')"
+  SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Budget exhausted after $SESSION_NUMBER session(s)")
+  jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
   debug_log "Budget exhausted - spawning detached cleanup"
   run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
 
@@ -1051,6 +1119,13 @@ fi
 
 # ============================================================================
 # STATE MACHINE: CHECK executing_on_completion
+# Currently unreachable-by-design (self-improving-os WP-03 review): the
+# STALE-STATE Case-1 block above already disposes of stop_hook_active=false +
+# executing_on_completion=true, and the continuation-cycle elif above already
+# disposes of stop_hook_active=true + executing_on_completion=true, so every
+# path reaching here would require both to be false — contradicting this
+# block's own guard. Kept as defensive dead code; no emit_signal call here —
+# if either upstream guard's invariant ever changes, add one here too.
 # ============================================================================
 if [[ "$EXECUTING_ON_COMPLETION" == "true" ]]; then
   debug_log "STATE: EXECUTING_ON_COMPLETION - on-completion command was sent, cleaning up"
@@ -1149,6 +1224,11 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
 BLOCKER_EOF
 
           update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_checklist_hash = \"$CURRENT_HASH\" | .termination_reason = \"doom_loop_detected\""
+
+          emit_signal "ralph-doomed" "$(jq -nc --arg reason "doom_loop_detected" --argjson stuck "$NEW_STUCK_COUNT" --argjson threshold "$AEOS_DOOM_THRESHOLD" '{reason: $reason, stuck_count: $stuck, doom_abort_threshold: $threshold}')"
+          SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Doom-loop detected — stuck for $NEW_STUCK_COUNT forks")
+          jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
           debug_log "AEOS doom-loop: spawning detached cleanup"
           run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
           exit 0
@@ -1182,6 +1262,11 @@ BLOCKER_EOF
 BLOCKER_EOF
 
         update_state "$STATE_FILE" ".active = false | .termination_reason = \"revision_budget_exhausted\""
+
+        emit_signal "ralph-doomed" "$(jq -nc --arg reason "revision_budget_exhausted" --argjson count "$AEOS_REVISION_COUNT" --argjson budget "$AEOS_REVISION_BUDGET" '{reason: $reason, revision_count: $count, revision_budget: $budget}')"
+        SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Revision budget exhausted ($AEOS_REVISION_COUNT/$AEOS_REVISION_BUDGET)")
+        jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
         debug_log "AEOS revision budget: spawning detached cleanup"
         run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
         exit 0
@@ -1490,6 +1575,10 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
 
         update_state "$STATE_FILE" ".awaiting_confirmation = false | .active = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"completed_no_on_completion\""
 
+        emit_signal "ralph-completed" "$(jq -nc --arg reason "completed_no_on_completion" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+        SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
+        jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
         debug_log "Spawning detached cleanup (no on-completion)"
         run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
 
@@ -1512,7 +1601,12 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
           }'
         exit 0
       else
-        update_state "$STATE_FILE" ".awaiting_confirmation = false | .active = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+        update_state "$STATE_FILE" ".awaiting_confirmation = false | .active = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"completed_no_checklist\""
+
+        emit_signal "ralph-completed" "$(jq -nc --arg reason "completed_no_checklist" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+        SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
+        jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
         debug_log "Spawning detached cleanup (no checklist, no on-completion)"
         run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
         exit 0
