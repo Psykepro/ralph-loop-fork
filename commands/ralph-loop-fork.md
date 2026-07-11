@@ -1,6 +1,6 @@
 ---
 description: "Start fork-based Ralph Loop (spawns new terminal each iteration)"
-argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup] [--worktree] [--worktree-base DIR] [--branch NAME] [--copy-paths \"P1 P2\"]"
+argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup] [--worktree] [--worktree-base DIR] [--branch NAME] [--copy-paths \"P1 P2\"] [--model NAME]"
 allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/setup-ralph-loop-fork.sh:*)"]
 hide-from-slash-command-tool: "true"
 ---
@@ -45,6 +45,7 @@ Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until 
 | `--worktree-base <dir>` | Parent dir for the worktree (only with `--worktree`) | `.worktrees` |
 | `--branch <name>` | Branch name for the worktree (only with `--worktree`) | `ralph/<loop-id>` |
 | `--copy-paths "<a b c>"` | Extra files/dirs to copy into the worktree (space-sep inside one quoted arg) | none |
+| `--model <name>` | Pin the Claude model for all spawned sessions (e.g., `sonnet`). Non-worktree mode: iteration 1 keeps the invoking session's model; forks use `--model` | inherit |
 
 ## Command vs On-Completion
 

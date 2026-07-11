@@ -50,6 +50,7 @@ WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 COPY_PATHS=""
+MODEL=""
 
 # Parse options and positional arguments
 while [[ $# -gt 0 ]]; do
@@ -83,6 +84,11 @@ OPTIONS:
   --branch <name>            Branch name for the worktree (default: ralph/<loop-id>)
   --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
                              (space-separated inside a single quoted arg)
+  --model <name>             Pin the Claude model for all SPAWNED sessions
+                             (e.g., sonnet, opus, haiku, or a full model id).
+                             Non-worktree mode: iteration 1 runs in the
+                             invoking session and keeps ITS model; forked
+                             sessions 2+ use --model.
   --resume                   Resume from previous fork (internal use)
   --session <n>              Session number (internal use)
   -h, --help                 Show this help message
@@ -306,6 +312,20 @@ HELP_EOF
       COPY_PATHS="$2"
       shift 2
       ;;
+    --model)
+      if [[ -z "${2:-}" ]]; then
+        _err "--model requires a model name argument" "Example: --model sonnet"
+        exit 1
+      fi
+      # Model names are passed to 'claude --model'; restrict to safe charset
+      # since the value is interpolated into a tmux shell command.
+      if [[ ! "$2" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        _err "--model contains invalid characters" "Allowed: letters, digits, dot, dash, underscore. Got: $2"
+        exit 1
+      fi
+      MODEL="$2"
+      shift 2
+      ;;
     *)
       _err "Unknown argument: $1" "Positional arguments no longer supported." "Use: --checklist <path> [--command <cmd>]"
       exit 1
@@ -475,6 +495,11 @@ else
     STOP_HOOK_REMINDERS_JSON=$(printf '%s' "$STOP_HOOK_REMINDERS" | jq -Rs .)
   fi
 
+  MODEL_JSON="null"
+  if [[ -n "$MODEL" ]]; then
+    MODEL_JSON=$(printf '%s' "$MODEL" | jq -Rs 'rtrimstr("\n")')
+  fi
+
   # Detect current tmux session name for preserve-final-session
   ORIGINAL_SESSION=""
   if [[ -n "${TMUX:-}" ]]; then
@@ -505,6 +530,7 @@ else
   "command": $COMMAND_JSON,
   "on_completion_command": $ON_COMPLETION_JSON,
   "stop_hook_reminders": $STOP_HOOK_REMINDERS_JSON,
+  "model": $MODEL_JSON,
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "fork_history": [],
   "awaiting_checklist_update": false,
@@ -735,7 +761,11 @@ if [[ "$WORKTREE" == "true" ]]; then
   # Launch the initial Claude session inside the worktree.
   SESSION_NAME="ralph-$LOOP_ID-1"
   INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions '$INIT_MSG'"
+  MODEL_FLAG=""
+  if [[ -n "$MODEL" ]]; then
+    MODEL_FLAG=" --model $MODEL"
+  fi
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions$MODEL_FLAG '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.
