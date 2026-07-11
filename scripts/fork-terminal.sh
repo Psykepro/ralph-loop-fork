@@ -87,7 +87,7 @@ fi
 SESSION_NAME="ralph-$LOOP_ID-$SESSION_NUMBER"
 
 # Check if session already exists
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+if tmux has-session -t "=$SESSION_NAME" 2>/dev/null; then
   # Session exists - increment and try again
   echo "Warning: Session $SESSION_NAME exists, incrementing..." >&2
   SESSION_NUMBER=$((SESSION_NUMBER + 1))
@@ -235,7 +235,7 @@ echo "Session $SESSION_NAME started"
 # Claude Code shows this prompt when launched in an untrusted directory.
 # Sending Enter accepts the default (option 1: "Yes, I trust this folder").
 # If no prompt appears (already trusted), Enter is harmless (empty input during startup).
-(sleep 4 && tmux send-keys -t "$SESSION_NAME" Enter 2>/dev/null) &
+(sleep 4 && tmux send-keys -t "=$SESSION_NAME" Enter 2>/dev/null) &
 
 # ============================================================================
 # CLEANUP OLD SESSIONS (BUG-008 fix)
@@ -264,7 +264,7 @@ if [[ -n "$OLD_SESSIONS" ]]; then
     ( nohup bash -c "
       sleep 5
       for s in $KILL_LIST; do
-        tmux kill-session -t \"\$s\" 2>/dev/null || true
+        tmux kill-session -t \"=\$s\" 2>/dev/null || true
       done
     " </dev/null >/dev/null 2>&1 & )
   fi

@@ -113,7 +113,7 @@ kill_tmux_session() {
     return 0
   fi
 
-  if tmux kill-session -t "$session_name" 2>/dev/null; then
+  if tmux kill-session -t "=$session_name" 2>/dev/null; then
     echo "  Killed tmux session: $session_name"
   fi
 }

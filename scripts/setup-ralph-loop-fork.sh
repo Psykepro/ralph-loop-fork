@@ -778,7 +778,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   mv "$TMP_STATE" "$MOVED_STATE_FILE"
 
   # Auto-accept "Trust this folder" prompt (best-effort, harmless otherwise).
-  (sleep 4 && tmux send-keys -t "$SESSION_NAME" Enter 2>/dev/null) &
+  (sleep 4 && tmux send-keys -t "=$SESSION_NAME" Enter 2>/dev/null) &
 
   # Success — release the rollback trap so a downstream `exit 0` doesn't
   # tear the worktree back down.
