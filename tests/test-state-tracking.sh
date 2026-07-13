@@ -444,6 +444,57 @@ fi
 echo ""
 
 # ============================================================================
+# Test 11: setup script model/effort defaults in state.json
+# ============================================================================
+echo "=== Test 11: setup script model/effort defaults ==="
+
+SETUP_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/scripts/setup-ralph-loop-fork.sh"
+SETUP_DIR="$TEST_DIR/setup-fixture"
+mkdir -p "$SETUP_DIR"
+echo "- [ ] task" > "$SETUP_DIR/checklist.md"
+
+# Test 11a: no --model/--effort → defaults sonnet/medium persisted
+(cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+  --checklist checklist.md --name deftest >/dev/null 2>&1)
+STATE_FILE="$SETUP_DIR/.claude/ralph-fork/deftest/state.json"
+MODEL_VAL=$(jq -r '.model // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+EFFORT_VAL=$(jq -r '.effort // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+if [[ "$MODEL_VAL" == "sonnet" ]] && [[ "$EFFORT_VAL" == "medium" ]]; then
+  pass "Defaults: model=sonnet effort=medium persisted when flags omitted"
+else
+  fail "Defaults: model=sonnet effort=medium persisted when flags omitted" \
+    "model=sonnet effort=medium" "model=$MODEL_VAL effort=$EFFORT_VAL"
+fi
+
+# Test 11b: explicit --model/--effort override the defaults
+(cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+  --checklist checklist.md --name ovrtest --model opus --effort high >/dev/null 2>&1)
+STATE_FILE="$SETUP_DIR/.claude/ralph-fork/ovrtest/state.json"
+MODEL_VAL=$(jq -r '.model // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+EFFORT_VAL=$(jq -r '.effort // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+if [[ "$MODEL_VAL" == "opus" ]] && [[ "$EFFORT_VAL" == "high" ]]; then
+  pass "Overrides: --model opus --effort high persisted"
+else
+  fail "Overrides: --model opus --effort high persisted" \
+    "model=opus effort=high" "model=$MODEL_VAL effort=$EFFORT_VAL"
+fi
+
+# Test 11c: invalid --effort value is rejected loudly, no state written
+SETUP_OUT=$( (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+  --checklist checklist.md --name badtest --effort turbo 2>&1) )
+SETUP_RC=$?
+if [[ $SETUP_RC -ne 0 ]] && grep -q "effort" <<< "$SETUP_OUT" \
+   && [[ ! -f "$SETUP_DIR/.claude/ralph-fork/badtest/state.json" ]]; then
+  pass "Invalid --effort rejected (nonzero exit, loud error, no state)"
+else
+  fail "Invalid --effort rejected (nonzero exit, loud error, no state)" \
+    "rc!=0, error mentions effort, no state file" \
+    "rc=$SETUP_RC state=$([[ -f "$SETUP_DIR/.claude/ralph-fork/badtest/state.json" ]] && echo present || echo absent)"
+fi
+
+echo ""
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo "========================================"

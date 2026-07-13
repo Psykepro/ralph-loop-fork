@@ -50,7 +50,8 @@ WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 COPY_PATHS=""
-MODEL=""
+MODEL="sonnet"
+EFFORT="medium"
 
 # Parse options and positional arguments
 while [[ $# -gt 0 ]]; do
@@ -86,9 +87,13 @@ OPTIONS:
                              (space-separated inside a single quoted arg)
   --model <name>             Pin the Claude model for all SPAWNED sessions
                              (e.g., sonnet, opus, haiku, or a full model id).
-                             Non-worktree mode: iteration 1 runs in the
-                             invoking session and keeps ITS model; forked
-                             sessions 2+ use --model.
+                             Default: sonnet.
+  --effort <level>           Pin the reasoning effort for all SPAWNED sessions
+                             (low|medium|high|xhigh|max). Default: medium.
+                             Non-worktree mode caveat (both flags): iteration 1
+                             runs in the invoking session and keeps ITS
+                             model/effort; defaults govern forked sessions 2+
+                             and worktree-mode iteration 1.
   --resume                   Resume from previous fork (internal use)
   --session <n>              Session number (internal use)
   -h, --help                 Show this help message
@@ -326,6 +331,25 @@ HELP_EOF
       MODEL="$2"
       shift 2
       ;;
+    --effort)
+      if [[ -z "${2:-}" ]]; then
+        _err "--effort requires a level argument" "Example: --effort medium"
+        exit 1
+      fi
+      # Effort is passed to 'claude --effort' and interpolated into a tmux
+      # shell command; restrict to the CLI's documented enum.
+      # Keep in sync with the same enum in scripts/fork-terminal.sh (state
+      # read-back validation) and the docs in README.md + commands/.
+      case "$2" in
+        low|medium|high|xhigh|max) ;;
+        *)
+          _err "--effort must be one of: low, medium, high, xhigh, max" "Got: $2"
+          exit 1
+          ;;
+      esac
+      EFFORT="$2"
+      shift 2
+      ;;
     *)
       _err "Unknown argument: $1" "Positional arguments no longer supported." "Use: --checklist <path> [--command <cmd>]"
       exit 1
@@ -500,6 +524,11 @@ else
     MODEL_JSON=$(printf '%s' "$MODEL" | jq -Rs 'rtrimstr("\n")')
   fi
 
+  EFFORT_JSON="null"
+  if [[ -n "$EFFORT" ]]; then
+    EFFORT_JSON=$(printf '%s' "$EFFORT" | jq -Rs 'rtrimstr("\n")')
+  fi
+
   # Detect current tmux session name for preserve-final-session
   ORIGINAL_SESSION=""
   if [[ -n "${TMUX:-}" ]]; then
@@ -531,6 +560,7 @@ else
   "on_completion_command": $ON_COMPLETION_JSON,
   "stop_hook_reminders": $STOP_HOOK_REMINDERS_JSON,
   "model": $MODEL_JSON,
+  "effort": $EFFORT_JSON,
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "fork_history": [],
   "awaiting_checklist_update": false,
@@ -765,7 +795,11 @@ if [[ "$WORKTREE" == "true" ]]; then
   if [[ -n "$MODEL" ]]; then
     MODEL_FLAG=" --model $MODEL"
   fi
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions$MODEL_FLAG '$INIT_MSG'"
+  EFFORT_FLAG=""
+  if [[ -n "$EFFORT" ]]; then
+    EFFORT_FLAG=" --effort $EFFORT"
+  fi
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.

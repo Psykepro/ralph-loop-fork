@@ -142,6 +142,47 @@ else
 fi
 
 echo ""
+echo -e "${YELLOW}Test 2: old state.json without effort key → --effort medium fallback, no crash${NC}"
+
+# Test 1's state.json predates the effort field entirely (and has no model
+# pin). The spawn must still succeed and default effort to medium, while
+# leaving the model unpinned (resumed old loops keep their model behavior).
+SPAWN2_LINE=$(grep "new-session" "$TMUX_LOG" | grep "ralph-${LOOP_ID}-2")
+if grep -qE -- '\-\-effort\\? medium' <<< "$SPAWN2_LINE"; then
+  pass "FORK_CMD contains --effort medium (missing-key fallback)"
+else
+  fail "FORK_CMD missing --effort medium fallback" "$SPAWN2_LINE"
+fi
+if ! grep -q -- "--model" <<< "$SPAWN2_LINE"; then
+  pass "Unpinned old state stays unpinned (no --model injected)"
+else
+  fail "--model unexpectedly injected for model-less state" "$SPAWN2_LINE"
+fi
+
+echo ""
+echo -e "${YELLOW}Test 3: state.json model/effort are read back into FORK_CMD${NC}"
+
+STATE_JSON="$WORKTREE_DIR/.claude/ralph-fork/$LOOP_ID/state.json"
+jq '.model = "sonnet" | .effort = "medium"' "$STATE_JSON" > "$STATE_JSON.tmp" \
+  && mv "$STATE_JSON.tmp" "$STATE_JSON"
+
+OUTPUT3=$(bash "$FORK_SCRIPT" "$LOOP_ID" 3 "$WORKTREE_DIR" 2>&1)
+RC3=$?
+if [[ $RC3 -eq 0 ]]; then
+  pass "fork-terminal.sh exited 0 with model+effort in state"
+else
+  fail "fork-terminal.sh exited $RC3" "$OUTPUT3"
+fi
+
+SPAWN3_LINE=$(grep "new-session" "$TMUX_LOG" | grep "ralph-${LOOP_ID}-3")
+if grep -qE -- '\-\-model\\? sonnet' <<< "$SPAWN3_LINE" \
+   && grep -qE -- '\-\-effort\\? medium' <<< "$SPAWN3_LINE"; then
+  pass "FORK_CMD contains --model sonnet --effort medium from state.json"
+else
+  fail "FORK_CMD missing persisted model/effort flags" "$SPAWN3_LINE"
+fi
+
+echo ""
 echo "========================================"
 echo "Test Results"
 echo "========================================"
