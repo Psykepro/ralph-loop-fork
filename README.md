@@ -273,9 +273,18 @@ in the loop's `state.json`.
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree (only with `--worktree`) |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name for the worktree (only with `--worktree`) |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy into the worktree, space-separated inside one quoted arg |
-| `--model <name>` | inherit | Pin the Claude model for all spawned sessions (e.g. `sonnet`). Non-worktree mode: iteration 1 keeps the invoking session's model; forks use `--model` |
+| `--model <name>` | `sonnet` | Pin the Claude model for all spawned sessions (e.g. `sonnet`, `opus`, or a full model id) |
+| `--effort <level>` | `medium` | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) |
 
-Forked sessions always launch with `claude --dangerously-skip-permissions`.
+Forked sessions always launch with `claude --dangerously-skip-permissions --model <model> --effort <level>`.
+
+**Iteration-1 caveat (non-worktree mode):** iteration 1 runs in the *invoking*
+session — it is not a fresh `claude` spawn, so it keeps that session's own
+model and effort. The `--model`/`--effort` values (including the defaults)
+govern forked sessions 2+ and, in `--worktree` mode, iteration 1 as well
+(worktree mode spawns even the first session via the CLI). State files written
+before v0.5.0 have no `effort` field; on resume they fall back to `medium`,
+while their `model` behavior is unchanged (unpinned stays unpinned).
 
 ---
 

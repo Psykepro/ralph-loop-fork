@@ -58,6 +58,19 @@ COMMAND=$(jq -r '.command // ""' "$STATE_FILE")
 STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE")
 MODEL=$(jq -r '.model // ""' "$STATE_FILE")
 [[ "$MODEL" == "null" ]] && MODEL=""
+# Effort: state files written before v0.5.0 have no effort key — fall back to
+# the documented default (medium) rather than crashing or spawning unset.
+# Keep the enum in sync with scripts/setup-ralph-loop-fork.sh --effort parse.
+EFFORT=$(jq -r '.effort // ""' "$STATE_FILE")
+[[ "$EFFORT" == "null" ]] && EFFORT=""
+[[ -z "$EFFORT" ]] && EFFORT="medium"
+case "$EFFORT" in
+  low|medium|high|xhigh|max) ;;
+  *)
+    echo "❌ ERROR: invalid effort '$EFFORT' in $STATE_FILE (allowed: low, medium, high, xhigh, max)" >&2
+    exit 1
+    ;;
+esac
 
 # Resolve CHECKLIST_PATH to absolute so forked sessions launched from any CWD can expand @
 if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECKLIST_PATH" != /* ]]; then
@@ -206,7 +219,11 @@ MODEL_FLAG=""
 if [[ -n "$MODEL" ]]; then
   MODEL_FLAG=" --model $MODEL"
 fi
-FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG '$INIT_MSG'"
+EFFORT_FLAG=""
+if [[ -n "$EFFORT" ]]; then
+  EFFORT_FLAG=" --effort $EFFORT"
+fi
+FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
 
 # Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
 if [[ ! -d "$CWD" ]]; then
