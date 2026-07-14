@@ -452,14 +452,20 @@ At loop launch (`setup-ralph-loop-fork.sh`), if `ralph_aeos_config.py` exists, i
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `doom_abort_threshold` | int | Consecutive iterations with no checklist change before termination (default: 3) |
+| `doom_abort_threshold` | int | Consecutive no-progress forks before the doom breaker engages (default: 3) |
 | `respect_revision_budget` | bool | Whether to enforce `revision_budget` from `loop-state.json` |
 | `required_markers` | list[str] | Evidence marker names that must exist before the completion promise is accepted |
 | `plan_dir` | str | Path to the evidence directory (`.evidence/`) relative to AEOS project root |
+| `progress_paths` | list[str] | (v0.5.1) Extra git roots whose HEAD counts as progress — for work that lands outside the project root (e.g. a plugin repo). Absolute paths. |
+| `progress_exclude` | list[str] | (v0.5.1) Extra repo-relative paths excluded from the working-tree progress hash (for always-mutating files). Entries must be space-free. |
 
 ### AEOS-controlled termination modes
 
-**Doom-loop detection**: If the checklist file content (hash) is unchanged across `doom_abort_threshold` consecutive forks, the loop terminates and writes `BLOCKER.md` to the loop directory with `termination_reason: doom_loop_detected`. This prevents stuck loops from running indefinitely.
+**Doom-loop detection** (v0.5.1 — progress fingerprint): a fork counts as "no progress" only when the **composite progress fingerprint** is unchanged: checklist content + project `HEAD` + working-tree state (excluding always-mutating paths: `_project/metrics`, `_project/signals`, `.claude/ralph-fork`, `BLOCKER.md`, plus `progress_exclude`) + `HEAD` of every declared `progress_paths` root. Commits, uncommitted edits, and declared external-repo work all reset the stuck counter — only genuine spinning accrues strikes. (Pre-0.5.1 the detector hashed only the checklist file, which false-positived on loops whose work landed before the checklist tick.)
+
+The breaker is **two-stage**: at `doom_abort_threshold` strikes the stopping session gets one blocking last-chance warning (and a `ralph-stuck-warning` signal is emitted) — one turn to land observable progress. If the fingerprint still hasn't moved at the next sample, the loop terminates and writes `BLOCKER.md` with `termination_reason: doom_loop_detected`. From the first strike onward, forked sessions also get a `⚠️ NO-PROGRESS WARNING` banner telling them to land close-out (commit + ticks + handoff) before new work.
+
+Debug a stuck loop's fingerprint by hand: `hooks/stop-hook-fork.sh --fingerprint <checklist> <project_root> <aeos_config>`.
 
 **Revision-budget exhaustion**: If `respect_revision_budget` is true and `loop-state.json:revision_count >= revision_budget`, the loop terminates with `termination_reason: revision_budget_exhausted`. The budget is set at loop launch via `--total-budget`.
 
