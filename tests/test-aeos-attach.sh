@@ -309,8 +309,10 @@ rm -f "$OUT4" "$ERR4"
 STOP_HOOK="$SCRIPT_DIR/hooks/stop-hook-fork.sh"
 
 # Build a minimal stop-hook fixture in DIR for LOOP_ID.
-# Params: dir loop_id stuck_count last_hash revision_count revision_budget
-#         doom_threshold respect_revision total_budget with_signals_dir
+# Params: dir loop_id stuck_count last_fp revision_count revision_budget
+#         doom_threshold respect_revision total_budget with_signals_dir doom_warned
+# last_fp is a PROGRESS FINGERPRINT (v0.5.1) — seed real values with
+# seed_progress_fp, not a raw checklist hash.
 make_stop_fixture() {
   local dir="$1" loop_id="$2"
   local stuck_count="${3:-0}"
@@ -321,6 +323,7 @@ make_stop_fixture() {
   local respect_revision="${8:-true}"
   local total_budget="${9:-100}"
   local with_signals_dir="${10:-true}"
+  local doom_warned="${11:-false}"
 
   mkdir -p "$dir/.claude/ralph-fork/$loop_id"
   mkdir -p "$dir/_project/progress/in-progress/test-plan"
@@ -374,7 +377,8 @@ ACEOF
   "awaiting_background_agents": false,
   "bg_agent_block_count": 0,
   "stuck_count": $stuck_count,
-  "last_checklist_hash": $hash_val,
+  "last_progress_fp": $hash_val,
+  "doom_warning_issued": $doom_warned,
   "spawned_sessions": []
 }
 STEOF
@@ -429,69 +433,111 @@ state_field() {
   [[ "$val" == "null" ]] && echo "null" || echo "$val"
 }
 
-# Compute checklist hash with same dual-path as stop-hook-fork.sh
-checklist_hash() {
-  local f="$1"
-  md5 -q "$f" 2>/dev/null || md5sum "$f" 2>/dev/null | awk '{print $1}'
+# Seed state.json's last_progress_fp with the CURRENT fingerprint of the
+# fixture, using the hook's own --fingerprint mode (no duplicated hash logic).
+seed_progress_fp() {
+  local dir="$1" loop_id="$2"
+  local state="$dir/.claude/ralph-fork/$loop_id/state.json"
+  local fp
+  fp=$(bash "$STOP_HOOK" --fingerprint \
+    "$dir/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md" \
+    "$dir" \
+    "$dir/.claude/ralph-fork/$loop_id/.aeos-config.json")
+  jq --arg fp "$fp" '.last_progress_fp = $fp' "$state" > "${state}.tmp"
+  mv "${state}.tmp" "$state"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${YELLOW}Test 5 (sub-03a): Doom-loop — hash unchanged at threshold → terminate + BLOCKER.md${NC}"
-# RED before patch: no AEOS block → active stays true, no BLOCKER.md.
+echo -e "${YELLOW}Test 5 (sub-03a): Doom-loop two-stage — last-chance block, then terminate + BLOCKER.md${NC}"
+# v0.5.1: threshold hit #1 → blocking warning (no kill); unchanged fingerprint
+# at the next sample → terminate.
 
 T5=$(mktemp -d -t aeos-t5-XXXX); _CLEANUP_DIRS+=("$T5")
-# Compute hash of the checklist content that make_stop_fixture will write
-_tmp5=$(mktemp)
-printf '# Checklist\n- [ ] Task A\n- [ ] Task B\n' > "$_tmp5"
-CL_HASH5=$(checklist_hash "$_tmp5")
-rm -f "$_tmp5"
-# stuck_count=2, threshold=3 — one more fire reaches threshold → terminate
-make_stop_fixture "$T5" "doom-t5" 2 "$CL_HASH5" 0 5 3 false
-OUT5=$(run_stop_hook "$T5" "doom-t5" false)
+# stuck_count=2, threshold=3 — next no-progress fire reaches threshold
+make_stop_fixture "$T5" "doom-t5" 2 "" 0 5 3 false
+seed_progress_fp "$T5" "doom-t5"
+
+# ── Stage 1: last-chance block ──
+OUT5A=$(run_stop_hook "$T5" "doom-t5" false)
+
+if echo "$OUT5A" | grep -q '"decision": *"block"' && echo "$OUT5A" | grep -q "LAST CHANCE"; then
+  pass "doom-loop stage1: blocking last-chance warning issued"
+else
+  fail "doom-loop stage1: expected last-chance block" "$(echo "$OUT5A" | head -5)"
+fi
+
+if [[ "$(state_field "$T5" "doom-t5" "doom_warning_issued")" == "true" ]]; then
+  pass "doom-loop stage1: doom_warning_issued=true persisted"
+else
+  fail "doom-loop stage1: doom_warning_issued not set" \
+    "got: $(state_field "$T5" "doom-t5" "doom_warning_issued")"
+fi
+
+if [[ "$(state_field "$T5" "doom-t5" "active")" != "false" ]]; then
+  pass "doom-loop stage1: loop still active (no premature kill)"
+else
+  fail "doom-loop stage1: loop terminated without last chance" ""
+fi
+
+if [[ ! -f "$T5/BLOCKER.md" ]]; then
+  pass "doom-loop stage1: no BLOCKER.md yet"
+else
+  fail "doom-loop stage1: BLOCKER.md written before last chance elapsed" ""
+fi
+
+# ── Stage 2: still no progress → terminate ──
+OUT5B=$(run_stop_hook "$T5" "doom-t5" false)
 
 if [[ "$(state_field "$T5" "doom-t5" "active")" == "false" ]]; then
-  pass "doom-loop: active=false after threshold reached"
+  pass "doom-loop stage2: active=false after last chance wasted"
 else
-  fail "doom-loop: expected active=false" "active=$(state_field "$T5" "doom-t5" "active")"
+  fail "doom-loop stage2: expected active=false" "active=$(state_field "$T5" "doom-t5" "active")"
 fi
 
 if [[ "$(state_field "$T5" "doom-t5" "termination_reason")" == "doom_loop_detected" ]]; then
-  pass "doom-loop: termination_reason=doom_loop_detected"
+  pass "doom-loop stage2: termination_reason=doom_loop_detected"
 else
-  fail "doom-loop: expected termination_reason=doom_loop_detected" \
+  fail "doom-loop stage2: expected termination_reason=doom_loop_detected" \
     "got: $(state_field "$T5" "doom-t5" "termination_reason")"
 fi
 
 if [[ -f "$T5/BLOCKER.md" ]]; then
-  pass "doom-loop: BLOCKER.md written at PROJECT_ROOT"
+  pass "doom-loop stage2: BLOCKER.md written at PROJECT_ROOT"
 else
-  fail "doom-loop: BLOCKER.md missing from PROJECT_ROOT" ""
+  fail "doom-loop stage2: BLOCKER.md missing from PROJECT_ROOT" ""
 fi
 
 if [[ -f "$T5/BLOCKER.md" ]] && grep -q "doom-loop-detected" "$T5/BLOCKER.md"; then
-  pass "doom-loop: BLOCKER.md contains 'doom-loop-detected'"
+  pass "doom-loop stage2: BLOCKER.md contains 'doom-loop-detected'"
 else
-  fail "doom-loop: BLOCKER.md missing 'doom-loop-detected'" \
+  fail "doom-loop stage2: BLOCKER.md missing 'doom-loop-detected'" \
     "$(cat "$T5/BLOCKER.md" 2>/dev/null | head -3)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${YELLOW}Test 6 (sub-03b): Hash change → stuck_count resets to 0${NC}"
-# RED before patch: AEOS block absent → last_checklist_hash not set in state.
+echo -e "${YELLOW}Test 6 (sub-03b): Fingerprint change → stuck_count resets to 0${NC}"
+# Stale fp in state (progress happened) → reset, including doom_warning_issued.
 
 T6=$(mktemp -d -t aeos-t6-XXXX); _CLEANUP_DIRS+=("$T6")
-# last_hash is a wrong value — checklist actual hash will differ
-make_stop_fixture "$T6" "hash-t6" 2 "oldhashabcdef12" 0 5 3 false
+# last_fp is a wrong value — actual fingerprint will differ; warned=true must reset
+make_stop_fixture "$T6" "hash-t6" 2 "oldhashabcdef12" 0 5 3 false 100 true true
 run_stop_hook "$T6" "hash-t6" false >/dev/null
 
-HASH6=$(state_field "$T6" "hash-t6" "last_checklist_hash")
+HASH6=$(state_field "$T6" "hash-t6" "last_progress_fp")
 if [[ "$HASH6" != "null" ]] && [[ "$HASH6" != "oldhashabcdef12" ]]; then
-  pass "hash-change: last_checklist_hash updated to current hash"
+  pass "hash-change: last_progress_fp updated to current fingerprint"
 else
-  fail "hash-change: expected last_checklist_hash updated from old value" \
+  fail "hash-change: expected last_progress_fp updated from old value" \
     "got: $HASH6"
+fi
+
+if [[ "$(state_field "$T6" "hash-t6" "doom_warning_issued")" == "false" ]]; then
+  pass "hash-change: doom_warning_issued reset to false on progress"
+else
+  fail "hash-change: doom_warning_issued not reset" \
+    "got: $(state_field "$T6" "hash-t6" "doom_warning_issued")"
 fi
 
 STUCK6=$(state_field "$T6" "hash-t6" "stuck_count")
@@ -509,19 +555,20 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${YELLOW}Test 7 (sub-03c): First iteration (no last_checklist_hash) → never stuck${NC}"
-# RED before patch: AEOS block absent → last_checklist_hash not written.
+echo -e "${YELLOW}Test 7 (sub-03c): First iteration (no last_progress_fp) → never stuck${NC}"
+# Migration guard: pre-v0.5.1 state files have no last_progress_fp → first
+# sample counts as progress, never as stuck.
 
 T7=$(mktemp -d -t aeos-t7-XXXX); _CLEANUP_DIRS+=("$T7")
-# last_hash="" → null in state.json, threshold=2 (would trigger if hash matched null)
+# last_fp="" → null in state.json, threshold=2 (would trigger if fp matched null)
 make_stop_fixture "$T7" "first-t7" 0 "" 0 5 2 false
 run_stop_hook "$T7" "first-t7" false >/dev/null
 
-HASH7=$(state_field "$T7" "first-t7" "last_checklist_hash")
+HASH7=$(state_field "$T7" "first-t7" "last_progress_fp")
 if [[ "$HASH7" != "null" ]]; then
-  pass "first-iter: last_checklist_hash written on first fire"
+  pass "first-iter: last_progress_fp written on first fire"
 else
-  fail "first-iter: last_checklist_hash not written" ""
+  fail "first-iter: last_progress_fp not written" ""
 fi
 
 if [[ "$(state_field "$T7" "first-t7" "active")" != "false" ]]; then
@@ -622,19 +669,125 @@ make_stop_fixture "$T11" "noop-t11" 0 "" 0 5 3 true
 rm -f "$T11/.claude/ralph-fork/noop-t11/.aeos-config.json"
 run_stop_hook "$T11" "noop-t11" false >/dev/null
 
-HASH11=$(state_field "$T11" "noop-t11" "last_checklist_hash")
+HASH11=$(state_field "$T11" "noop-t11" "last_progress_fp")
 STUCK11=$(state_field "$T11" "noop-t11" "stuck_count")
 if [[ "$HASH11" == "null" ]] && [[ "$STUCK11" == "0" || "$STUCK11" == "null" ]]; then
-  pass "no-config: no stuck_count/last_checklist_hash written (zero state change)"
+  pass "no-config: no stuck_count/last_progress_fp written (zero state change)"
 else
   fail "no-config: AEOS state written despite no config" \
-    "last_checklist_hash=$HASH11 stuck_count=$STUCK11"
+    "last_progress_fp=$HASH11 stuck_count=$STUCK11"
 fi
 
 if [[ "$(state_field "$T11" "noop-t11" "active")" != "false" ]]; then
   pass "no-config: loop not terminated (standalone safe)"
 else
   fail "no-config: loop terminated without config present" ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v0.5.1: Progress-fingerprint tests (Tests D1–D4)
+# The doom detector must treat ANY observable state movement as progress:
+# commits (D1), non-volatile working-tree changes (D3), declared external
+# roots (D4) — while volatile always-mutating paths stay invisible (D2).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# git-enabled fixture helper: init + commit everything so HEAD/tree are stable
+git_fixture() {
+  local dir="$1"
+  git -C "$dir" init -q -b main
+  git -C "$dir" config user.email t@t.local
+  git -C "$dir" config user.name t
+  git -C "$dir" add -A
+  git -C "$dir" commit -qm "fixture: baseline"
+}
+
+echo ""
+echo -e "${YELLOW}Test D1 (v0.5.1): Commit with unchanged checklist → stuck_count resets${NC}"
+# THE 2026-07-13 false positive: work committed, checklist not ticked → killed.
+
+TD1=$(mktemp -d -t aeos-td1-XXXX); _CLEANUP_DIRS+=("$TD1")
+make_stop_fixture "$TD1" "fp-d1" 2 "" 0 5 3 false
+git_fixture "$TD1"
+seed_progress_fp "$TD1" "fp-d1"
+git -C "$TD1" commit -q --allow-empty -m "real work landed, checklist lagging"
+run_stop_hook "$TD1" "fp-d1" false >/dev/null
+
+if [[ "$(state_field "$TD1" "fp-d1" "stuck_count")" == "0" ]]; then
+  pass "fp-commit: stuck_count reset to 0 after HEAD moved"
+else
+  fail "fp-commit: expected stuck_count=0 (commit IS progress)" \
+    "got: $(state_field "$TD1" "fp-d1" "stuck_count")"
+fi
+
+if [[ "$(state_field "$TD1" "fp-d1" "active")" != "false" ]]; then
+  pass "fp-commit: loop not terminated (false positive prevented)"
+else
+  fail "fp-commit: loop terminated despite a commit landing" ""
+fi
+
+echo ""
+echo -e "${YELLOW}Test D2 (v0.5.1): Volatile-path-only change → still counts as stuck${NC}"
+# Hook-appended jsonl must stay invisible or the breaker can never fire.
+
+TD2=$(mktemp -d -t aeos-td2-XXXX); _CLEANUP_DIRS+=("$TD2")
+make_stop_fixture "$TD2" "fp-d2" 1 "" 0 5 3 false
+git_fixture "$TD2"
+seed_progress_fp "$TD2" "fp-d2"
+mkdir -p "$TD2/_project/metrics/hooks"
+echo '{"violation":"x"}' >> "$TD2/_project/metrics/hooks/violations.jsonl"
+echo '{"event":"y"}' >> "$TD2/_project/signals/events.jsonl"
+run_stop_hook "$TD2" "fp-d2" false >/dev/null
+
+if [[ "$(state_field "$TD2" "fp-d2" "stuck_count")" == "2" ]]; then
+  pass "fp-volatile: stuck_count incremented (volatile churn is NOT progress)"
+else
+  fail "fp-volatile: expected stuck_count=2" \
+    "got: $(state_field "$TD2" "fp-d2" "stuck_count")"
+fi
+
+echo ""
+echo -e "${YELLOW}Test D3 (v0.5.1): Non-volatile working-tree change → stuck_count resets${NC}"
+
+TD3=$(mktemp -d -t aeos-td3-XXXX); _CLEANUP_DIRS+=("$TD3")
+make_stop_fixture "$TD3" "fp-d3" 2 "" 0 5 3 false
+git_fixture "$TD3"
+seed_progress_fp "$TD3" "fp-d3"
+echo "uncommitted real work" > "$TD3/wip.txt"
+run_stop_hook "$TD3" "fp-d3" false >/dev/null
+
+if [[ "$(state_field "$TD3" "fp-d3" "stuck_count")" == "0" ]]; then
+  pass "fp-tree: stuck_count reset to 0 after working-tree change"
+else
+  fail "fp-tree: expected stuck_count=0 (uncommitted edits ARE progress)" \
+    "got: $(state_field "$TD3" "fp-d3" "stuck_count")"
+fi
+
+echo ""
+echo -e "${YELLOW}Test D4 (v0.5.1): Declared external progress root — commit there → resets${NC}"
+# sub-03 scenario: the work lands in a DIFFERENT repo (e.g. a plugin repo).
+
+TD4=$(mktemp -d -t aeos-td4-XXXX); _CLEANUP_DIRS+=("$TD4")
+TD4EXT=$(mktemp -d -t aeos-td4ext-XXXX); _CLEANUP_DIRS+=("$TD4EXT")
+git_fixture "$TD4EXT" 2>/dev/null || { git -C "$TD4EXT" init -q -b main; git -C "$TD4EXT" config user.email t@t.local; git -C "$TD4EXT" config user.name t; git -C "$TD4EXT" commit -q --allow-empty -m baseline; }
+make_stop_fixture "$TD4" "fp-d4" 2 "" 0 5 3 false
+CFG_D4="$TD4/.claude/ralph-fork/fp-d4/.aeos-config.json"
+jq --arg ext "$TD4EXT" '.progress_paths = [$ext]' "$CFG_D4" > "${CFG_D4}.tmp"
+mv "${CFG_D4}.tmp" "$CFG_D4"
+seed_progress_fp "$TD4" "fp-d4"
+git -C "$TD4EXT" commit -q --allow-empty -m "external work landed"
+run_stop_hook "$TD4" "fp-d4" false >/dev/null
+
+if [[ "$(state_field "$TD4" "fp-d4" "stuck_count")" == "0" ]]; then
+  pass "fp-external: stuck_count reset after commit in declared progress root"
+else
+  fail "fp-external: expected stuck_count=0 (external-root commit IS progress)" \
+    "got: $(state_field "$TD4" "fp-d4" "stuck_count")"
+fi
+
+if [[ "$(state_field "$TD4" "fp-d4" "active")" != "false" ]]; then
+  pass "fp-external: loop not terminated"
+else
+  fail "fp-external: loop terminated despite external progress" ""
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -718,7 +871,7 @@ ACEOF
   "awaiting_background_agents": false,
   "bg_agent_block_count": 0,
   "stuck_count": 0,
-  "last_checklist_hash": null,
+  "last_progress_fp": null,
   "marker_block_count": $marker_block_count,
   "spawned_sessions": []
 }
@@ -924,11 +1077,20 @@ echo ""
 echo -e "${YELLOW}Test 18 (sub-03-signal-a): Doom-loop → events.jsonl row kind=ralph-doomed${NC}"
 
 T18=$(mktemp -d -t aeos-t18-XXXX); _CLEANUP_DIRS+=("$T18")
-_tmp18=$(mktemp)
-printf '# Checklist\n- [ ] Task A\n- [ ] Task B\n' > "$_tmp18"
-CL_HASH18=$(checklist_hash "$_tmp18")
-rm -f "$_tmp18"
-make_stop_fixture "$T18" "doom-t18" 2 "$CL_HASH18" 0 5 3 false
+make_stop_fixture "$T18" "doom-t18" 2 "" 0 5 3 false
+seed_progress_fp "$T18" "doom-t18"
+
+# First no-progress fire at threshold → stage-1 last-chance warning signal
+run_stop_hook "$T18" "doom-t18" false >/dev/null
+
+if [[ "$(last_event "$T18" '.kind')" == "ralph-stuck-warning" ]]; then
+  pass "signal: stage-1 row kind=ralph-stuck-warning"
+else
+  fail "signal: expected kind=ralph-stuck-warning after last-chance block" \
+    "got: $(last_event "$T18" '.kind')"
+fi
+
+# Second no-progress fire → terminate with ralph-doomed
 OUT18=$(run_stop_hook "$T18" "doom-t18" false)
 
 if [[ -f "$T18/_project/signals/events.jsonl" ]]; then
@@ -1001,11 +1163,9 @@ echo ""
 echo -e "${YELLOW}Test 21 (sub-03-signal-d): non-AEOS repo (no _project/signals/) → no write, no error${NC}"
 
 T21=$(mktemp -d -t aeos-t21-XXXX); _CLEANUP_DIRS+=("$T21")
-_tmp21=$(mktemp)
-printf '# Checklist\n- [ ] Task A\n- [ ] Task B\n' > "$_tmp21"
-CL_HASH21=$(checklist_hash "$_tmp21")
-rm -f "$_tmp21"
-make_stop_fixture "$T21" "doom-t21" 2 "$CL_HASH21" 0 5 3 false 100 false
+# doom_warned=true → single no-progress fire terminates (stage-2 direct)
+make_stop_fixture "$T21" "doom-t21" 2 "" 0 5 3 false 100 false true
+seed_progress_fp "$T21" "doom-t21"
 OUT21=$(run_stop_hook "$T21" "doom-t21" false)
 
 if [[ ! -d "$T21/_project/signals" ]] && [[ ! -f "$T21/_project/signals/events.jsonl" ]]; then

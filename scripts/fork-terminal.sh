@@ -72,6 +72,21 @@ case "$EFFORT" in
     ;;
 esac
 
+# No-progress early warning (AEOS doom-loop, v0.5.1): if previous sessions
+# accrued stuck strikes, tell the NEXT session up front — before termination is
+# on the table — that close-out (commit + ticks + handoff) must land first.
+# Fail-open: missing config / missing keys → no banner (standalone behavior).
+STUCK_COUNT=$(jq -r '.stuck_count // 0' "$STATE_FILE" 2>/dev/null) || STUCK_COUNT=0
+DOOM_THRESHOLD=$(jq -r '.doom_abort_threshold // 0' "$LOOP_DIR/.aeos-config.json" 2>/dev/null) || DOOM_THRESHOLD=0
+STUCK_BANNER=""
+if [[ "$DOOM_THRESHOLD" =~ ^[0-9]+$ ]] && [[ "$STUCK_COUNT" =~ ^[0-9]+$ ]] \
+   && [[ "$DOOM_THRESHOLD" -gt 0 ]] && [[ "$STUCK_COUNT" -ge 1 ]]; then
+  STUCK_BANNER="⚠️ NO-PROGRESS WARNING ($STUCK_COUNT of $DOOM_THRESHOLD strikes): the last $STUCK_COUNT session(s) ended with NO observable progress — no commit, no working-tree change, no checklist tick. At $DOOM_THRESHOLD strikes the loop TERMINATES.
+FIRST ACTION THIS SESSION: land the close-out for any already-finished work — commit it, mark completed checklist items [x], append the handoff-log entry — BEFORE starting new work. If work landed outside this repo, tick + handoff NOW so progress becomes visible.
+
+"
+fi
+
 # Resolve CHECKLIST_PATH to absolute so forked sessions launched from any CWD can expand @
 if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECKLIST_PATH" != /* ]]; then
   CHECKLIST_PATH="$PROJECT_ROOT/$CHECKLIST_PATH"
@@ -151,7 +166,7 @@ fi
 # Include ralph loop context so the new session knows how to complete
 # Token is critical for preventing false matches from other sessions reading ralph files
 if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
-  FULL_PROMPT="$PROMPT
+  FULL_PROMPT="$STUCK_BANNER$PROMPT
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
@@ -169,7 +184,10 @@ PARALLEL SUB-AGENTS (CRITICAL RULE):
 - Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):
-1. Update the checklist file - mark completed items with [x]
+1. Update the checklist file - mark completed items with [x].
+   Close-out is part of the work, not an epilogue: tick items and append the
+   handoff entry in the SAME step as the commit that finishes them — a session
+   boundary between 'work committed' and 'checklist ticked' reads as NO progress.
 2. Add a session notes section at the bottom:
    ### Session $SESSION_NUMBER Notes
    - Key findings and decisions made
@@ -178,7 +196,7 @@ BEFORE EXITING (MANDATORY):
    - Learnings worth preserving for /reflect-learn
 3. These notes will be used by /reflect-learn at the end to update skills$REMINDERS_SECTION"
 else
-  FULL_PROMPT="$PROMPT
+  FULL_PROMPT="$STUCK_BANNER$PROMPT
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
@@ -193,7 +211,10 @@ PARALLEL SUB-AGENTS (CRITICAL RULE):
 - Do NOT end your turn until every sub-agent result has been received and integrated.
 
 BEFORE EXITING (MANDATORY):
-1. Update the checklist file - mark completed items with [x]
+1. Update the checklist file - mark completed items with [x].
+   Close-out is part of the work, not an epilogue: tick items and append the
+   handoff entry in the SAME step as the commit that finishes them — a session
+   boundary between 'work committed' and 'checklist ticked' reads as NO progress.
 2. Add a session notes section at the bottom:
    ### Session $SESSION_NUMBER Notes
    - Key findings and decisions made

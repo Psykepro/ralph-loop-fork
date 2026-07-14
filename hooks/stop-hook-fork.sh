@@ -791,6 +791,74 @@ spawn_new_session() {
 }
 
 # ============================================================================
+# AEOS PROGRESS FINGERPRINT (doom-loop detection)
+# Composite of: checklist md5 + project HEAD + working-tree state (volatile
+# paths excluded) + HEADs of declared external progress roots.
+# v0.5.1 doom false-positive fix (2026-07-13): checklist-hash-only detection
+# treated real progress (commits, working-tree edits, external-repo work) as
+# "stuck". Progress is now ANY observable state movement.
+# Every git read fails open (empty component) — a non-git project root
+# degrades to checklist-only detection, exactly the v0.5.0 behavior.
+# ============================================================================
+hash_stdin() {
+  md5 2>/dev/null || md5sum 2>/dev/null | awk '{print $1}'
+}
+
+compute_progress_fingerprint() {
+  local checklist_path="$1" project_root="$2" aeos_config="$3"
+  local parts="" comp=""
+
+  # 1) Checklist content
+  if [[ -n "$checklist_path" ]] && [[ -f "$checklist_path" ]]; then
+    comp=$(md5 -q "$checklist_path" 2>/dev/null || md5sum "$checklist_path" 2>/dev/null | awk '{print $1}') || comp=""
+    parts="checklist:$comp"
+  fi
+
+  # 2) Project HEAD — a commit is progress even when the checklist lags
+  comp=$(git -C "$project_root" rev-parse HEAD 2>/dev/null) || comp=""
+  parts="$parts|head:$comp"
+
+  # 3) Working-tree state, minus always-mutating paths (hook-appended jsonl,
+  #    loop state). Without these exclusions the tree hash changes EVERY
+  #    session and the breaker could never fire again — the false-positive fix
+  #    must not become a false-negative machine. Extra excludes come from
+  #    .progress_exclude[] in .aeos-config.json.
+  local excludes="_project/metrics _project/signals .claude/ralph-fork BLOCKER.md"
+  local extra
+  extra=$(jq -r '.progress_exclude[]? // empty' "$aeos_config" 2>/dev/null | tr '\n' ' ') || extra=""
+  excludes="$excludes $extra"
+  local pathspec="" e
+  for e in $excludes; do
+    pathspec="$pathspec :(exclude)$e"
+  done
+  # Intentional word-splitting on $pathspec: exclude entries are repo-relative,
+  # space-free by contract (documented in README).
+  # shellcheck disable=SC2086
+  comp=$( { git -C "$project_root" status --porcelain=v1 -- . $pathspec 2>/dev/null; \
+            git -C "$project_root" diff HEAD -- . $pathspec 2>/dev/null; } | hash_stdin ) || comp=""
+  parts="$parts|tree:$comp"
+
+  # 4) Declared external progress roots (work landing outside the project
+  #    root, e.g. a plugin repo) — HEAD only, from .progress_paths[] in config.
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    comp=$(git -C "$root" rev-parse HEAD 2>/dev/null) || comp=""
+    parts="$parts|ext:$root:$comp"
+  done < <(jq -r '.progress_paths[]? // empty' "$aeos_config" 2>/dev/null)
+
+  printf '%s' "$parts" | hash_stdin
+}
+
+# Diagnostic mode: print the fingerprint for given inputs and exit.
+# Used by the test suite to seed fixtures and by humans to debug stuck loops:
+#   stop-hook-fork.sh --fingerprint <checklist_path> <project_root> <aeos_config>
+if [[ "${1:-}" == "--fingerprint" ]]; then
+  compute_progress_fingerprint "${2:-}" "${3:-.}" "${4:-/nonexistent}"
+  exit 0
+fi
+
+# ============================================================================
 # MAIN HOOK LOGIC
 # ============================================================================
 
@@ -1196,34 +1264,59 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
 
   # ── Doom-loop detection ──────────────────────────────────────────────────
   # Gate on STOP_HOOK_ACTIVE=false: count once per fork, not per hook fire.
+  # Progress = composite fingerprint (checklist + HEAD + working tree +
+  # declared external roots), NOT just the checklist hash (v0.5.1 fix).
+  # Two-stage breaker: first threshold hit → blocking last-chance warning to
+  # the live session; still no state movement at the next sample → terminate.
   if [[ "$STOP_HOOK_ACTIVE" == "false" ]] && [[ "$AEOS_DOOM_THRESHOLD" -gt 0 ]]; then
-    CURRENT_HASH=""
-    if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
-      CURRENT_HASH=$(md5 -q "$CHECKLIST_PATH" 2>/dev/null || \
-                    md5sum "$CHECKLIST_PATH" 2>/dev/null | awk '{print $1}') || CURRENT_HASH=""
-    fi
+    CURRENT_FP=$(compute_progress_fingerprint "$CHECKLIST_PATH" "$PROJECT_ROOT" "$AEOS_CONFIG_FILE") || CURRENT_FP=""
 
-    if [[ -n "$CURRENT_HASH" ]]; then
-      LAST_HASH=$(jq -r '.last_checklist_hash // ""' "$STATE_FILE" 2>/dev/null) || LAST_HASH=""
+    if [[ -n "$CURRENT_FP" ]]; then
+      LAST_FP=$(jq -r '.last_progress_fp // ""' "$STATE_FILE" 2>/dev/null) || LAST_FP=""
       STUCK_COUNT=$(jq -r '.stuck_count // 0' "$STATE_FILE" 2>/dev/null) || STUCK_COUNT=0
+      DOOM_WARNED=$(jq -r '.doom_warning_issued // false' "$STATE_FILE" 2>/dev/null) || DOOM_WARNED=false
 
-      if [[ "$CURRENT_HASH" == "$LAST_HASH" ]]; then
+      if [[ "$CURRENT_FP" == "$LAST_FP" ]]; then
         NEW_STUCK_COUNT=$((STUCK_COUNT + 1))
-        debug_log "AEOS doom-loop: hash unchanged ($CURRENT_HASH), stuck_count=$NEW_STUCK_COUNT/$AEOS_DOOM_THRESHOLD"
+        debug_log "AEOS doom-loop: fingerprint unchanged ($CURRENT_FP), stuck_count=$NEW_STUCK_COUNT/$AEOS_DOOM_THRESHOLD, warned=$DOOM_WARNED"
+
+        if [[ $NEW_STUCK_COUNT -ge $AEOS_DOOM_THRESHOLD ]] && [[ "$DOOM_WARNED" != "true" ]]; then
+          # Stage 1: last-chance BLOCK. The current session gets one turn to
+          # land observable progress (commit / tick / handoff). A genuinely
+          # spinning agent cannot fake it — the next sample verifies actual
+          # state, not claims.
+          info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP WARNING — no observable progress for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD). Issuing last-chance block."
+          info ""
+
+          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = true"
+
+          emit_signal "ralph-stuck-warning" "$(jq -nc --argjson stuck "$NEW_STUCK_COUNT" --argjson threshold "$AEOS_DOOM_THRESHOLD" '{reason: "doom_last_chance", stuck_count: $stuck, doom_abort_threshold: $threshold}')"
+
+          jq -n \
+            --arg loopid "$LOOP_ID" \
+            --argjson n "$NEW_STUCK_COUNT" \
+            --argjson t "$AEOS_DOOM_THRESHOLD" \
+            '{
+              "decision": "block",
+              "reason": ("Ralph Loop [\($loopid)]: ⛔ DOOM-LOOP LAST CHANCE — \($n) consecutive session forks produced NO observable progress (no commit, no working-tree change, no checklist tick). The loop TERMINATES at the next stop unless real state moves. Do these NOW, in order: (1) commit any finished work in this repo; (2) mark every completed checklist item [x] and append the handoff-log entry; (3) if your work landed outside this repo (another git repo, an external system), tick + handoff NOW so it becomes visible, and note the external location in the handoff entry. If you are genuinely blocked, write the blocker into the checklist session notes instead. Do NOT output the completion promise unless it is true."),
+              "systemMessage": ("Ralph [\($loopid)]: doom-loop last chance — \($n)/\($t) stuck forks, terminate on next no-progress stop")
+            }'
+          exit 0
+        fi
 
         if [[ $NEW_STUCK_COUNT -ge $AEOS_DOOM_THRESHOLD ]]; then
-          info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP DETECTED — checklist unchanged for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD)."
+          info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP DETECTED — no observable progress for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD, last-chance warning already issued)."
           info ""
 
           cat > "$PROJECT_ROOT/BLOCKER.md" <<BLOCKER_EOF
 # BLOCKER
 
 **Condition:** doom-loop-detected
-**Detail:** Checklist hash unchanged for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD). Loop ID: $LOOP_ID, plan_dir: ${AEOS_PLAN_DIR:-unknown}.
-**Fix:** Review the checklist and the last session transcript. Identify why progress has stalled, fix the underlying issue, then remove this file and re-run the loop.
+**Detail:** Progress fingerprint (checklist + HEAD + working tree + declared external roots) unchanged for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD), including one last-chance warning turn. Loop ID: $LOOP_ID, plan_dir: ${AEOS_PLAN_DIR:-unknown}.
+**Fix:** Review the checklist and the last session transcript. Identify why progress has stalled, fix the underlying issue, then remove this file and re-run the loop. If work lands outside the project root, declare it in progress_paths (loop-state.json / .aeos-config.json) so the detector can see it.
 BLOCKER_EOF
 
-          update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_checklist_hash = \"$CURRENT_HASH\" | .termination_reason = \"doom_loop_detected\""
+          update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .termination_reason = \"doom_loop_detected\""
 
           emit_signal "ralph-doomed" "$(jq -nc --arg reason "doom_loop_detected" --argjson stuck "$NEW_STUCK_COUNT" --argjson threshold "$AEOS_DOOM_THRESHOLD" '{reason: $reason, stuck_count: $stuck, doom_abort_threshold: $threshold}')"
           SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Doom-loop detected — stuck for $NEW_STUCK_COUNT forks")
@@ -1233,11 +1326,11 @@ BLOCKER_EOF
           run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
           exit 0
         else
-          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_checklist_hash = \"$CURRENT_HASH\""
+          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\""
         fi
       else
-        debug_log "AEOS doom-loop: hash changed (${LAST_HASH:-none} → $CURRENT_HASH), resetting stuck_count"
-        update_state "$STATE_FILE" ".stuck_count = 0 | .last_checklist_hash = \"$CURRENT_HASH\""
+        debug_log "AEOS doom-loop: fingerprint changed (${LAST_FP:-none} → $CURRENT_FP), resetting stuck_count"
+        update_state "$STATE_FILE" ".stuck_count = 0 | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = false"
       fi
     fi
   fi
