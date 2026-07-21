@@ -436,7 +436,11 @@ run_cleanup_detached() {
   # NOTE: Split local/assignment so mktemp failure is visible — bash `local var=$(cmd)`
   # always returns 0, masking the exit code of cmd.
   local cleanup_script
-  cleanup_script=$(mktemp "${TMPDIR:-/tmp}/ralph-cleanup-XXXXXX.sh") || {
+  # No .sh suffix: BSD/macOS mktemp only randomizes TRAILING X's — with a
+  # suffix the file is created literally, and every later cleanup collides
+  # with it and gets skipped ("mktemp failed"). The script runs via explicit
+  # path with a shebang; the extension is irrelevant.
+  cleanup_script=$(mktemp "${TMPDIR:-/tmp}/ralph-cleanup-XXXXXX") || {
     debug_log "DETACHED CLEANUP: mktemp failed for $loop_id — cleanup skipped (state already marked inactive)"
     return 1
   }
@@ -805,7 +809,7 @@ hash_stdin() {
 }
 
 compute_progress_fingerprint() {
-  local checklist_path="$1" project_root="$2" aeos_config="$3"
+  local checklist_path="$1" project_root="$2" aeos_config="$3" worktree_path="${4:-}"
   local parts="" comp=""
 
   # 1) Checklist content
@@ -847,14 +851,29 @@ compute_progress_fingerprint() {
     parts="$parts|ext:$root:$comp"
   done < <(jq -r '.progress_paths[]? // empty' "$aeos_config" 2>/dev/null)
 
+  # 5) Implicit worktree progress root (state.worktree_path, v0.5.2 — INC-031
+  #    first recurrence): when the loop dir lives in the primary repo but the
+  #    sessions work in a linked worktree, find_project_root resolves
+  #    PROJECT_ROOT to the primary and the worktree's commits/edits are
+  #    otherwise invisible — false strikes on a healthy loop. HEAD + tree,
+  #    same volatile excludes as the project tree.
+  if [[ -n "$worktree_path" ]] && [[ "$worktree_path" != "$project_root" ]] && [[ -d "$worktree_path" ]]; then
+    comp=$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null) || comp=""
+    parts="$parts|wt-head:$comp"
+    # shellcheck disable=SC2086
+    comp=$( { git -C "$worktree_path" status --porcelain=v1 -- . $pathspec 2>/dev/null; \
+              git -C "$worktree_path" diff HEAD -- . $pathspec 2>/dev/null; } | hash_stdin ) || comp=""
+    parts="$parts|wt-tree:$comp"
+  fi
+
   printf '%s' "$parts" | hash_stdin
 }
 
 # Diagnostic mode: print the fingerprint for given inputs and exit.
 # Used by the test suite to seed fixtures and by humans to debug stuck loops:
-#   stop-hook-fork.sh --fingerprint <checklist_path> <project_root> <aeos_config>
+#   stop-hook-fork.sh --fingerprint <checklist_path> <project_root> <aeos_config> [worktree_path]
 if [[ "${1:-}" == "--fingerprint" ]]; then
-  compute_progress_fingerprint "${2:-}" "${3:-.}" "${4:-/nonexistent}"
+  compute_progress_fingerprint "${2:-}" "${3:-.}" "${4:-/nonexistent}" "${5:-}"
   exit 0
 fi
 
@@ -1269,7 +1288,22 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
   # Two-stage breaker: first threshold hit → blocking last-chance warning to
   # the live session; still no state movement at the next sample → terminate.
   if [[ "$STOP_HOOK_ACTIVE" == "false" ]] && [[ "$AEOS_DOOM_THRESHOLD" -gt 0 ]]; then
-    CURRENT_FP=$(compute_progress_fingerprint "$CHECKLIST_PATH" "$PROJECT_ROOT" "$AEOS_CONFIG_FILE") || CURRENT_FP=""
+    # v0.5.2 (INC-031 second recurrence): enforce the one-sample-per-fork
+    # invariant EXPLICITLY. Worktree-fallback attribution matches ANY session
+    # stopping in the loop's worktree (sub-agents, auxiliary sessions), so
+    # gating on STOP_HOOK_ACTIVE alone let concurrent stops of the same fork
+    # generation accrue strikes — and once even issue the last-chance warning
+    # to one session and the kill 5 seconds later on another. Key every
+    # sample to the loop's fork counter instead.
+    [[ "$SESSION_NUMBER" =~ ^[0-9]+$ ]] || SESSION_NUMBER=1
+    LAST_SAMPLE_SESSION=$(jq -r '.last_doom_sample_session // -1' "$STATE_FILE" 2>/dev/null) || LAST_SAMPLE_SESSION=-1
+    if [[ "$SESSION_NUMBER" == "$LAST_SAMPLE_SESSION" ]]; then
+      debug_log "AEOS doom-loop: fork $SESSION_NUMBER already sampled — one sample per fork, skipping"
+      CURRENT_FP=""
+    else
+      STATE_WORKTREE_PATH=$(jq -r '.worktree_path // ""' "$STATE_FILE" 2>/dev/null) || STATE_WORKTREE_PATH=""
+      CURRENT_FP=$(compute_progress_fingerprint "$CHECKLIST_PATH" "$PROJECT_ROOT" "$AEOS_CONFIG_FILE" "$STATE_WORKTREE_PATH") || CURRENT_FP=""
+    fi
 
     if [[ -n "$CURRENT_FP" ]]; then
       LAST_FP=$(jq -r '.last_progress_fp // ""' "$STATE_FILE" 2>/dev/null) || LAST_FP=""
@@ -1288,7 +1322,7 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
           info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP WARNING — no observable progress for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD). Issuing last-chance block."
           info ""
 
-          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = true"
+          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = true | .doom_warned_session = $SESSION_NUMBER | .last_doom_sample_session = $SESSION_NUMBER"
 
           emit_signal "ralph-stuck-warning" "$(jq -nc --argjson stuck "$NEW_STUCK_COUNT" --argjson threshold "$AEOS_DOOM_THRESHOLD" '{reason: "doom_last_chance", stuck_count: $stuck, doom_abort_threshold: $threshold}')"
 
@@ -1305,6 +1339,18 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
         fi
 
         if [[ $NEW_STUCK_COUNT -ge $AEOS_DOOM_THRESHOLD ]]; then
+          # v0.5.2 belt-and-braces: the kill sample must come from a LATER
+          # fork than the one that received the last-chance warning — the
+          # warned fork's own re-stops can never be the kill. Normally
+          # unreachable (the once-per-fork gate already dedupes), but guards
+          # legacy/hand-edited state.
+          DOOM_WARNED_SESSION=$(jq -r '.doom_warned_session // -1' "$STATE_FILE" 2>/dev/null) || DOOM_WARNED_SESSION=-1
+          if [[ "$DOOM_WARNED_SESSION" =~ ^[0-9]+$ ]] && [[ "$SESSION_NUMBER" -le "$DOOM_WARNED_SESSION" ]]; then
+            debug_log "AEOS doom-loop: warned at fork $DOOM_WARNED_SESSION, no newer fork yet — holding kill"
+            update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_doom_sample_session = $SESSION_NUMBER"
+            exit 0
+          fi
+
           info "Ralph Loop Fork [$LOOP_ID]: DOOM-LOOP DETECTED — no observable progress for $NEW_STUCK_COUNT consecutive forks (threshold: $AEOS_DOOM_THRESHOLD, last-chance warning already issued)."
           info ""
 
@@ -1316,21 +1362,26 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
 **Fix:** Review the checklist and the last session transcript. Identify why progress has stalled, fix the underlying issue, then remove this file and re-run the loop. If work lands outside the project root, declare it in progress_paths (loop-state.json / .aeos-config.json) so the detector can see it.
 BLOCKER_EOF
 
-          update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .termination_reason = \"doom_loop_detected\""
+          update_state "$STATE_FILE" ".active = false | .stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .termination_reason = \"doom_loop_detected\" | .last_doom_sample_session = $SESSION_NUMBER"
 
           emit_signal "ralph-doomed" "$(jq -nc --arg reason "doom_loop_detected" --argjson stuck "$NEW_STUCK_COUNT" --argjson threshold "$AEOS_DOOM_THRESHOLD" '{reason: $reason, stuck_count: $stuck, doom_abort_threshold: $threshold}')"
           SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Doom-loop detected — stuck for $NEW_STUCK_COUNT forks")
           jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
 
           debug_log "AEOS doom-loop: spawning detached cleanup"
-          run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+          # v0.5.2 (INC-031): NEVER preserve on a doom abort — with
+          # --preserve-final-session the "final session" is the live doomed
+          # session itself (earlier forks are already dead), so preserving it
+          # made the kill a no-op and the loop ran on unmanaged. BLOCKER.md +
+          # the archived loop dir are the inspection artifacts.
+          run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "false" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
           exit 0
         else
-          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\""
+          update_state "$STATE_FILE" ".stuck_count = $NEW_STUCK_COUNT | .last_progress_fp = \"$CURRENT_FP\" | .last_doom_sample_session = $SESSION_NUMBER"
         fi
       else
         debug_log "AEOS doom-loop: fingerprint changed (${LAST_FP:-none} → $CURRENT_FP), resetting stuck_count"
-        update_state "$STATE_FILE" ".stuck_count = 0 | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = false"
+        update_state "$STATE_FILE" ".stuck_count = 0 | .last_progress_fp = \"$CURRENT_FP\" | .doom_warning_issued = false | .last_doom_sample_session = $SESSION_NUMBER"
       fi
     fi
   fi
@@ -1361,7 +1412,8 @@ BLOCKER_EOF
         jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
 
         debug_log "AEOS revision budget: spawning detached cleanup"
-        run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+        # v0.5.2: abort terminations never preserve (see doom path above).
+        run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "false" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
         exit 0
       else
         debug_log "AEOS revision budget: $AEOS_REVISION_COUNT/$AEOS_REVISION_BUDGET"

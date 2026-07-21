@@ -26,8 +26,14 @@ if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]] && \
 fi
 
 # ── Stub bin: override tmux so worktree tests are hermetic (no real sessions) ──
+# The stub logs every invocation so tests can assert on ATTEMPTED tmux calls
+# (e.g. D5 asserts the doom cleanup tries to kill the final session).
 STUB_BIN=$(mktemp -d -t aeos-stubs-XXXX)
-printf '#!/bin/sh\nexit 0\n' > "$STUB_BIN/tmux"
+cat > "$STUB_BIN/tmux" <<STUBEOF
+#!/bin/sh
+echo "\$@" >> "$STUB_BIN/tmux-calls.log"
+exit 0
+STUBEOF
 chmod +x "$STUB_BIN/tmux"
 export PATH="$STUB_BIN:$PATH"
 
@@ -447,6 +453,17 @@ seed_progress_fp() {
   mv "${state}.tmp" "$state"
 }
 
+# Advance the loop's fork generation (session_number in local.md frontmatter),
+# mirroring what the state machine does when it spawns the next fork. Doom
+# sampling is once-per-fork (v0.5.2), so tests that expect a second sample
+# must bump the generation between hook runs.
+bump_fork_session() {
+  local dir="$1" loop_id="$2" n="$3"
+  local local_md="$dir/.claude/ralph-fork/$loop_id/local.md"
+  sed -i '' "s/^session_number: .*/session_number: $n/" "$local_md" 2>/dev/null || \
+    sed -i "s/^session_number: .*/session_number: $n/" "$local_md"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Test 5 (sub-03a): Doom-loop two-stage — last-chance block, then terminate + BLOCKER.md${NC}"
@@ -487,6 +504,9 @@ else
 fi
 
 # ── Stage 2: still no progress → terminate ──
+# v0.5.2: the kill sample must come from a LATER fork than the warned one
+# (the state machine spawns session 3 after the warned session's turn ends).
+bump_fork_session "$T5" "doom-t5" 3
 OUT5B=$(run_stop_hook "$T5" "doom-t5" false)
 
 if [[ "$(state_field "$T5" "doom-t5" "active")" == "false" ]]; then
@@ -513,6 +533,35 @@ if [[ -f "$T5/BLOCKER.md" ]] && grep -q "doom-loop-detected" "$T5/BLOCKER.md"; t
 else
   fail "doom-loop stage2: BLOCKER.md missing 'doom-loop-detected'" \
     "$(cat "$T5/BLOCKER.md" 2>/dev/null | head -3)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 5c (v0.5.2): Same-fork re-sample after warning → NO kill${NC}"
+# INC-031 second recurrence signature: warning and kill 5 seconds apart,
+# sampled by two different session stops of the SAME fork generation
+# (worktree-fallback attribution). The last-chance contract requires a full
+# new fork before the kill sample can fire.
+
+T5C=$(mktemp -d -t aeos-t5c-XXXX); _CLEANUP_DIRS+=("$T5C")
+make_stop_fixture "$T5C" "doom-t5c" 2 "" 0 5 3 false
+seed_progress_fp "$T5C" "doom-t5c"
+run_stop_hook "$T5C" "doom-t5c" false >/dev/null   # stage 1: warning at fork 2
+
+# a second session of the same fork generation stops moments later
+run_stop_hook "$T5C" "doom-t5c" false >/dev/null
+
+if [[ "$(state_field "$T5C" "doom-t5c" "active")" == "true" ]]; then
+  pass "same-fork: no kill from a re-sample within the warned fork generation"
+else
+  fail "same-fork: loop terminated without a post-warning fork (INC-031 5s kill)" \
+    "active=$(state_field "$T5C" "doom-t5c" "active")"
+fi
+
+if [[ ! -f "$T5C/BLOCKER.md" ]]; then
+  pass "same-fork: no BLOCKER.md written"
+else
+  fail "same-fork: BLOCKER.md written by same-fork re-sample" ""
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -788,6 +837,79 @@ if [[ "$(state_field "$TD4" "fp-d4" "active")" != "false" ]]; then
   pass "fp-external: loop not terminated"
 else
   fail "fp-external: loop terminated despite external progress" ""
+fi
+
+echo ""
+echo -e "${YELLOW}Test D5 (v0.5.2): Doom termination kills the live session even with preserve_final_session=true${NC}"
+# INC-031 second recurrence (routed-caps): the doom-kill preserved the very
+# session it was terminating — sessions 1..N-1 were already dead, and the
+# "final session" IS the live doomed session, so the kill was a no-op and the
+# loop ran on unmanaged. Doom/abort termination must never preserve.
+# tmux is the suite-wide logging stub — assert the cleanup ATTEMPTS the kill
+# (the real-tmux end-to-end kill path is covered by cleanup itself; what this
+# guards is the preserve decision).
+
+TD5=$(mktemp -d -t aeos-td5-XXXX); _CLEANUP_DIRS+=("$TD5")
+D5_TMUX="ralph-fp-d5-$$"
+# stuck=3, warned=true → this sample is the kill sample
+make_stop_fixture "$TD5" "fp-d5" 3 "" 0 5 3 false 100 true true
+ST_D5="$TD5/.claude/ralph-fork/fp-d5/state.json"
+jq --arg s "$D5_TMUX" \
+  '.preserve_final_session = true | .spawned_sessions = [{"name": $s}] | .doom_warned_session = 2' \
+  "$ST_D5" > "${ST_D5}.tmp" && mv "${ST_D5}.tmp" "$ST_D5"
+seed_progress_fp "$TD5" "fp-d5"
+bump_fork_session "$TD5" "fp-d5" 3
+run_stop_hook "$TD5" "fp-d5" false >/dev/null
+
+if [[ "$(jq -r '.termination_reason // ""' "$ST_D5" 2>/dev/null)" == "doom_loop_detected" ]] || [[ ! -f "$ST_D5" ]]; then
+  pass "doom-kill: kill sample fired (state terminated or archived)"
+else
+  fail "doom-kill: kill sample did not fire" \
+    "state: $(jq -c '{active, stuck_count, termination_reason}' "$ST_D5" 2>/dev/null)"
+fi
+
+# Detached cleanup sleeps 2s before acting — poll the stub call log.
+D5_KILLED=false
+for _ in $(seq 1 10); do
+  sleep 1
+  if grep -q "kill-session -t =$D5_TMUX" "$STUB_BIN/tmux-calls.log" 2>/dev/null; then
+    D5_KILLED=true; break
+  fi
+done
+if [[ "$D5_KILLED" == "true" ]]; then
+  pass "doom-kill: cleanup killed the final session despite preserve_final_session=true"
+else
+  fail "doom-kill: final session preserved on doom abort (zombie loop, INC-031)" \
+    "stub calls: $(grep "$D5_TMUX" "$STUB_BIN/tmux-calls.log" 2>/dev/null | tr '\n' ' ')"
+fi
+
+echo ""
+echo -e "${YELLOW}Test D6 (v0.5.2): Commit in state.worktree_path (undeclared) → resets stuck${NC}"
+# INC-031 first recurrence (rule-skill-behavioral-walk): loop dir in the
+# primary repo, work in the linked worktree — find_project_root resolved
+# PROJECT_ROOT to the primary, so the worktree's commits were invisible to
+# the fingerprint. state.worktree_path is now an implicit progress root.
+
+TD6=$(mktemp -d -t aeos-td6-XXXX); _CLEANUP_DIRS+=("$TD6")
+TD6WT=$(mktemp -d -t aeos-td6wt-XXXX); _CLEANUP_DIRS+=("$TD6WT")
+git -C "$TD6WT" init -q -b main
+git -C "$TD6WT" config user.email t@t.local
+git -C "$TD6WT" config user.name t
+git -C "$TD6WT" commit -q --allow-empty -m baseline
+make_stop_fixture "$TD6" "fp-d6" 0 "" 0 5 3 false
+git_fixture "$TD6"
+ST_D6="$TD6/.claude/ralph-fork/fp-d6/state.json"
+jq --arg wt "$TD6WT" '.worktree_path = $wt' "$ST_D6" > "${ST_D6}.tmp" && mv "${ST_D6}.tmp" "$ST_D6"
+run_stop_hook "$TD6" "fp-d6" false >/dev/null      # sample 1 at fork 2 records the live fp
+bump_fork_session "$TD6" "fp-d6" 3
+git -C "$TD6WT" commit -q --allow-empty -m "work landed in the worktree"
+run_stop_hook "$TD6" "fp-d6" false >/dev/null      # sample 2 must see the worktree HEAD move
+
+if [[ "$(state_field "$TD6" "fp-d6" "stuck_count")" == "0" ]]; then
+  pass "fp-worktree: stuck_count reset after commit in state.worktree_path"
+else
+  fail "fp-worktree: worktree commit invisible to fingerprint (INC-031)" \
+    "got: $(state_field "$TD6" "fp-d6" "stuck_count")"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1091,6 +1213,8 @@ else
 fi
 
 # Second no-progress fire → terminate with ralph-doomed
+# (v0.5.2: kill sample must come from a later fork than the warned one)
+bump_fork_session "$T18" "doom-t18" 3
 OUT18=$(run_stop_hook "$T18" "doom-t18" false)
 
 if [[ -f "$T18/_project/signals/events.jsonl" ]]; then
