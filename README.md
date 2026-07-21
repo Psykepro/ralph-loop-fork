@@ -465,7 +465,9 @@ At loop launch (`setup-ralph-loop-fork.sh`), if `ralph_aeos_config.py` exists, i
 
 The breaker is **two-stage**: at `doom_abort_threshold` strikes the stopping session gets one blocking last-chance warning (and a `ralph-stuck-warning` signal is emitted) — one turn to land observable progress. If the fingerprint still hasn't moved at the next sample, the loop terminates and writes `BLOCKER.md` with `termination_reason: doom_loop_detected`. From the first strike onward, forked sessions also get a `⚠️ NO-PROGRESS WARNING` banner telling them to land close-out (commit + ticks + handoff) before new work.
 
-Debug a stuck loop's fingerprint by hand: `hooks/stop-hook-fork.sh --fingerprint <checklist> <project_root> <aeos_config>`.
+**v0.5.2 sampling + kill guarantees** (INC-031 recurrences): the fingerprint is sampled **once per fork generation** — worktree-fallback attribution matches *any* session stopping in the loop's worktree (sub-agents, auxiliary sessions), so samples are keyed to the loop's fork counter instead of raw stop events; the kill sample must come from a **later fork than the one that received the warning** (a warned fork's own re-stops can never terminate the loop); `state.worktree_path` is an **implicit progress root** (HEAD + tree), covering loops whose state dir resolves to the primary repo while the work lands in a linked worktree; and doom/revision-budget aborts **never honor `--preserve-final-session`** — the "final session" at abort time is the live doomed session itself, and preserving it turned the kill into a no-op zombie loop.
+
+Debug a stuck loop's fingerprint by hand: `hooks/stop-hook-fork.sh --fingerprint <checklist> <project_root> <aeos_config> [worktree_path]`.
 
 **Revision-budget exhaustion**: If `respect_revision_budget` is true and `loop-state.json:revision_count >= revision_budget`, the loop terminates with `termination_reason: revision_budget_exhausted`. The budget is set at loop launch via `--total-budget`.
 
