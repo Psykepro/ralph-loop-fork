@@ -175,13 +175,13 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
-PARALLEL SUB-AGENTS (CRITICAL RULE):
-- NEVER use Agent with run_in_background=true inside this session.
-  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
-  message. The harness runs them concurrently and waits for ALL to finish before continuing.
-  You get full parallelism without losing results across session boundaries.
-- Do NOT end your turn until every sub-agent result has been received and integrated.
+PARALLEL SUB-AGENTS:
+- Sub-agents run in the background by default; their results arrive as task notifications on a
+  later turn, not inline. Launch as many as you need, in one message for parallelism.
+- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
+  delivered its result — do NOT declare completion or output the promise until you have received
+  and integrated every result.
+- Do NOT spawn new sub-agents after outputting the promise.
 
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x].
@@ -202,13 +202,13 @@ else
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
 - This is a continuation session. Work through the checklist until complete.
 
-PARALLEL SUB-AGENTS (CRITICAL RULE):
-- NEVER use Agent with run_in_background=true inside this session.
-  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
-  message. The harness runs them concurrently and waits for ALL to finish before continuing.
-  You get full parallelism without losing results across session boundaries.
-- Do NOT end your turn until every sub-agent result has been received and integrated.
+PARALLEL SUB-AGENTS:
+- Sub-agents run in the background by default; their results arrive as task notifications on a
+  later turn, not inline. Launch as many as you need, in one message for parallelism.
+- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
+  delivered its result — do NOT declare completion or output the promise until you have received
+  and integrated every result.
+- Do NOT spawn new sub-agents after outputting the promise.
 
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x].

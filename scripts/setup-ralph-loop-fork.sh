@@ -630,17 +630,16 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOK
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
-PARALLEL SUB-AGENTS (CRITICAL RULE):
-- NEVER use Agent with run_in_background=true inside this session.
-  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-  A harness hook enforces this: any run_in_background=true call is blocked automatically.
-- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
-  message. The harness runs them concurrently and waits for ALL to finish before continuing.
-  You get full parallelism without losing results across session boundaries.
-- Do NOT end your turn until every sub-agent result has been received and integrated.
+PARALLEL SUB-AGENTS:
+- Sub-agents run in the background by default; their results arrive as task notifications on a
+  later turn, not inline. Launch as many as you need, in one message for parallelism.
+- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
+  delivered its result — do NOT declare completion or output the promise until you have received
+  and integrated every result.
+- Do NOT spawn new sub-agents after outputting the promise.
 - Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
-  folders, or agent-*.jsonl files. There are no orphaned background agents to find — the
-  harness hook blocks background agents before they can spawn.
+  folders, or agent-*.jsonl files for orphaned work — the stop hook already waits for every
+  sub-agent this session launched; there is nothing to recover from a prior session.
 
 BEFORE EXITING (MANDATORY):
 
@@ -666,17 +665,16 @@ else
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
 - This is session 1. Work through the checklist until complete.
 
-PARALLEL SUB-AGENTS (CRITICAL RULE):
-- NEVER use Agent with run_in_background=true inside this session.
-  Background agents are orphaned when the session forks — results are LOST, tokens wasted.
-  A harness hook enforces this: any run_in_background=true call is blocked automatically.
-- Parallel research still works: send multiple Agent calls WITHOUT run_in_background in ONE
-  message. The harness runs them concurrently and waits for ALL to finish before continuing.
-  You get full parallelism without losing results across session boundaries.
-- Do NOT end your turn until every sub-agent result has been received and integrated.
+PARALLEL SUB-AGENTS:
+- Sub-agents run in the background by default; their results arrive as task notifications on a
+  later turn, not inline. Launch as many as you need, in one message for parallelism.
+- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
+  delivered its result — do NOT declare completion or output the promise until you have received
+  and integrated every result.
+- Do NOT spawn new sub-agents after outputting the promise.
 - Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
-  folders, or agent-*.jsonl files. There are no orphaned background agents to find — the
-  harness hook blocks background agents before they can spawn.
+  folders, or agent-*.jsonl files for orphaned work — the stop hook already waits for every
+  sub-agent this session launched; there is nothing to recover from a prior session.
 
 BEFORE EXITING (MANDATORY):
 
@@ -799,7 +797,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   if [[ -n "$EFFORT" ]]; then
     EFFORT_FLAG=" --effort $EFFORT"
   fi
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.
