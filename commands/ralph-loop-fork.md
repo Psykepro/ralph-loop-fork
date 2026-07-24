@@ -45,10 +45,21 @@ Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until 
 | `--worktree-base <dir>` | Parent dir for the worktree (only with `--worktree`) | `.worktrees` |
 | `--branch <name>` | Branch name for the worktree (only with `--worktree`) | `ralph/<loop-id>` |
 | `--copy-paths "<a b c>"` | Extra files/dirs to copy into the worktree (space-sep inside one quoted arg) | none |
-| `--model <name>` | Pin the Claude model for all spawned sessions (e.g., `sonnet`) | `sonnet` |
-| `--effort <level>` | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) | `medium` |
+| `--model <name>` | Pin the Claude model for all spawned sessions (e.g., `sonnet`) | resolved (see below) |
+| `--effort <level>` | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) | resolved (see below) |
 
-Non-worktree mode caveat: iteration 1 runs in the invoking session and keeps ITS model/effort; `--model`/`--effort` (and their defaults) govern forked sessions 2+ and worktree-mode iteration 1.
+Non-worktree mode caveat: iteration 1 runs in the invoking session and keeps ITS model/effort; the resolved model/effort govern forked sessions 2+ and worktree-mode iteration 1.
+
+### Model/Effort Resolution (4-layer precedence, highest wins)
+
+Model and effort resolve **independently** through the same 4 layers:
+
+1. **`--model`/`--effort` flags** — explicit per-invocation intent, always wins.
+2. **AEOS `model_policy.implementation`** — read from `<project-root>/_project/project-settings.json` when present (AEOS-bootstrapped projects only; inert/no-op otherwise). Bare aliases only; a dated model id is honored but warns.
+3. **Plugin config file** — `<project-root>/.claude/ralph-fork/config.json`, then `~/.claude/ralph-fork/config.json` (project wins over user). Schema: `{"model": "sonnet", "effort": "medium"}`, both keys optional.
+4. **Built-in default** — `sonnet` / `medium`.
+
+Every layer fails open with a loud `⚠️` warning on a malformed/invalid value (never silently, never fails the loop) and falls through to the next layer. The resolved pair and each field's source (`flag` / `aeos:model_policy.implementation` / `config:project` / `config:user` / `default`) are printed in the startup banner and written to `state.json` (`model`, `effort`, `model_source`, `effort_source`) — resolution happens once at setup time and is frozen for the whole loop; editing a policy/config file does not affect an already-running loop.
 
 ## Command vs On-Completion
 

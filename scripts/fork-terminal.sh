@@ -56,14 +56,30 @@ COMPLETION_PROMISE=$(jq -r '.completion_promise' "$STATE_FILE")
 CHECKLIST_PATH=$(jq -r '.checklist_file // ""' "$STATE_FILE")
 COMMAND=$(jq -r '.command // ""' "$STATE_FILE")
 STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE")
+# Built-in defaults — MUST match scripts/setup-ralph-loop-fork.sh's
+# DEFAULT_MODEL/DEFAULT_EFFORT (pinned by tests/test-model-resolution.sh).
+DEFAULT_MODEL="sonnet"
+DEFAULT_EFFORT="medium"
+
+# Model/effort: state files written before v0.5.0 (or with the key otherwise
+# missing/empty) have no model/effort key. Fall back to the SAME built-in
+# default, symmetrically, with a loud warning — a silent no-flag spawn would
+# leak whatever model/effort another session last persisted to user settings
+# (the original bug). This heals pre-v0.5.0 loops on their next fork.
+# Keep the enum in sync with scripts/setup-ralph-loop-fork.sh --effort parse.
 MODEL=$(jq -r '.model // ""' "$STATE_FILE")
 [[ "$MODEL" == "null" ]] && MODEL=""
-# Effort: state files written before v0.5.0 have no effort key — fall back to
-# the documented default (medium) rather than crashing or spawning unset.
-# Keep the enum in sync with scripts/setup-ralph-loop-fork.sh --effort parse.
+if [[ -z "$MODEL" ]]; then
+  echo "⚠️  no model in $STATE_FILE — falling back to default: $DEFAULT_MODEL" >&2
+  MODEL="$DEFAULT_MODEL"
+fi
+
 EFFORT=$(jq -r '.effort // ""' "$STATE_FILE")
 [[ "$EFFORT" == "null" ]] && EFFORT=""
-[[ -z "$EFFORT" ]] && EFFORT="medium"
+if [[ -z "$EFFORT" ]]; then
+  echo "⚠️  no effort in $STATE_FILE — falling back to default: $DEFAULT_EFFORT" >&2
+  EFFORT="$DEFAULT_EFFORT"
+fi
 case "$EFFORT" in
   low|medium|high|xhigh|max) ;;
   *)
@@ -234,17 +250,21 @@ INIT_MSG="Read and execute the task in $PROMPT_FILE_ABS"
 # CRITICAL: Unset CLAUDECODE to prevent "cannot be launched inside another Claude Code session" error.
 # tmux sessions inherit env vars from the parent process, and CLAUDECODE causes Claude to
 # refuse to start, silently killing the forked session (discovered 2026-02-14).
-# Optional model pinning: persisted in state.json by setup --model (charset
-# validated there since the value is interpolated into this shell command).
-MODEL_FLAG=""
-if [[ -n "$MODEL" ]]; then
-  MODEL_FLAG=" --model $MODEL"
+# Model/effort: resolved above (state.json value, or the DEFAULT_* fallback
+# with a warning) — never empty by this point. Assert defensively: a spawn
+# with no flag at all would leak whatever model another session last
+# persisted to user settings (the original bug), so refuse rather than spawn.
+if [[ -z "$MODEL" ]] || [[ -z "$EFFORT" ]]; then
+  echo "❌ ERROR: refusing to spawn — model/effort resolved empty (model='$MODEL' effort='$EFFORT')" >&2
+  exit 1
 fi
-EFFORT_FLAG=""
-if [[ -n "$EFFORT" ]]; then
-  EFFORT_FLAG=" --effort $EFFORT"
-fi
-FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
+MODEL_FLAG=" --model $MODEL"
+EFFORT_FLAG=" --effort $EFFORT"
+# Unset ANTHROPIC_MODEL/CLAUDE_CODE_EFFORT_LEVEL — the tmux server's global
+# environment can otherwise carry a leaked model/effort into the spawned
+# session. Do NOT unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate
+# alias redirections (e.g. Bedrock).
+FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
 
 # Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
 if [[ ! -d "$CWD" ]]; then
