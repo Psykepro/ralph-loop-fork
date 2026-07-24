@@ -676,6 +676,63 @@ count_pending_background_agents() {
 }
 
 # ============================================================================
+# BACKGROUND WORK DETECTION (revised, post-empirical — see
+# _project/specs/bug-stop-hook-bg-agent-false-positive-2026-07-24.md Appendix)
+#
+# Native `background_tasks` in the Stop/SubagentStop hook's own stdin reports
+# currently-pending sub-agents/background shell commands by PRESENCE — a
+# completed entry is removed outright, never marked "completed". This is the
+# primary check (replaces the old run_in_background-keyed matcher for modern
+# CC) and covers AC1 (agent still running).
+#
+# The undelivered-notification check (a <task-notification> enqueue line
+# appearing AFTER the last assistant message line in the transcript) is ALWAYS
+# run in addition, unconditionally — background_tasks is already empty in the
+# window between a sub-agent finishing and its result being integrated by the
+# model (the [redacted] incident's actual race, AC2). Presence alone would miss it.
+#
+# The legacy transcript matcher (count_pending_background_agents, above) is
+# used ONLY when the `background_tasks` key is entirely absent from hook
+# input (a CC version older than this field).
+# ============================================================================
+count_undelivered_notifications() {
+  local transcript="$1"
+
+  [[ ! -f "$transcript" ]] && echo "0" && return 0
+
+  local last_assistant_line
+  last_assistant_line=$(grep -n '"role":"assistant"' "$transcript" 2>/dev/null | tail -1 | cut -d: -f1)
+  [[ -z "$last_assistant_line" ]] && last_assistant_line=0
+
+  local count
+  count=$(tail -n +"$((last_assistant_line + 1))" "$transcript" 2>/dev/null | grep -c 'task-notification') || count=0
+  echo "$count"
+}
+
+compute_pending_background_work() {
+  local hook_input="$1"
+  local transcript="$2"
+
+  local has_bt
+  has_bt=$(echo "$hook_input" | jq -r 'has("background_tasks")' 2>/dev/null) || has_bt="false"
+
+  local bt_count=0
+  if [[ "$has_bt" == "true" ]]; then
+    bt_count=$(echo "$hook_input" | jq -r '.background_tasks | length' 2>/dev/null) || bt_count=0
+    debug_log "BG WORK: background_tasks present, count=$bt_count"
+  else
+    bt_count=$(count_pending_background_agents "$transcript")
+    debug_log "BG WORK: background_tasks absent (legacy CC) - transcript fallback count=$bt_count"
+  fi
+
+  local undelivered
+  undelivered=$(count_undelivered_notifications "$transcript")
+  [[ "$undelivered" -gt 0 ]] && debug_log "BG WORK: $undelivered undelivered task-notification(s) after last assistant message"
+
+  echo $((bt_count + undelivered))
+}
+
+# ============================================================================
 # TRANSCRIPT-BASED LOOP ID EXTRACTION
 # ============================================================================
 extract_loop_from_transcript() {
@@ -1129,7 +1186,7 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     # We previously blocked waiting for background agents — re-check if they're done.
     # No cap: keep blocking until every started agent delivers its result.
     debug_log "CONTINUATION: awaiting_background_agents=true - re-checking"
-    PENDING_BG_CONT=$(count_pending_background_agents "$TRANSCRIPT_PATH")
+    PENDING_BG_CONT=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
     if [[ $PENDING_BG_CONT -gt 0 ]]; then
       NEW_BG_COUNT=$((BG_AGENT_BLOCK_COUNT + 1))
       update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
@@ -1245,7 +1302,7 @@ fi
 # its task-notification result. No cap — waits for all agents regardless of
 # how many were started.
 # ============================================================================
-BG_PENDING=$(count_pending_background_agents "$TRANSCRIPT_PATH")
+BG_PENDING=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
 if [[ $BG_PENDING -gt 0 ]]; then
   debug_log "RUNNING: $BG_PENDING pending background agents detected — BLOCKING"
   info "Ralph Loop Fork [$LOOP_ID]: $BG_PENDING background agent(s) still running — waiting for results..."
@@ -1506,6 +1563,16 @@ Do not describe your work — just take the correct action."
   fi
 fi
 
+# D5 hardening: prefer last_assistant_message from the Stop hook's own stdin
+# (docs-sanctioned replacement for transcript parsing — the transcript file is
+# written asynchronously and may lag the in-memory conversation at hook time).
+# Only fall back to transcript parsing when it's absent/empty.
+LAST_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null) || LAST_OUTPUT=""
+if [[ -n "$LAST_OUTPUT" ]]; then
+  debug_log "D5: using last_assistant_message from hook input (${#LAST_OUTPUT} chars)"
+else
+  debug_log "D5: last_assistant_message absent/empty in hook input - falling back to transcript parsing"
+
 LAST_LINE=$(grep '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null | tail -1) || LAST_LINE=""
 if [[ -z "$LAST_LINE" ]]; then
   debug_log "Failed to extract last assistant message"
@@ -1646,6 +1713,8 @@ The XML tags are REQUIRED for completion detection!"; fi)"
   rm -f "$LOCAL_FILE"
   exit 0
 fi
+
+fi  # end D5 last_assistant_message fallback
 
 debug_log "Parsed assistant output: ${#LAST_OUTPUT} chars"
 
