@@ -273,18 +273,29 @@ in the loop's `state.json`.
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree (only with `--worktree`) |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name for the worktree (only with `--worktree`) |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy into the worktree, space-separated inside one quoted arg |
-| `--model <name>` | `sonnet` | Pin the Claude model for all spawned sessions (e.g. `sonnet`, `opus`, or a full model id) |
-| `--effort <level>` | `medium` | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) |
+| `--model <name>` | resolved | Pin the Claude model for all spawned sessions (e.g. `sonnet`, `opus`, or a full model id) |
+| `--effort <level>` | resolved | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) |
 
-Forked sessions always launch with `claude --dangerously-skip-permissions --model <model> --effort <level>`.
+Forked sessions always launch with `claude --dangerously-skip-permissions --model <model> --effort <level>` — every spawn path asserts both flags are non-empty before launching, so a resolver bug fails loudly instead of silently spawning with the ambient (possibly leaked) model from another session's persisted `/model` choice.
+
+### Model/Effort Resolution (4-layer precedence, highest wins)
+
+`--model`/`--effort` resolve **independently** through 4 layers:
+
+1. **Explicit `--model`/`--effort` flag** — per-invocation intent, always wins.
+2. **AEOS `model_policy.implementation`** — read from `<project-root>/_project/project-settings.json` when present (inert/no-op in non-AEOS projects).
+3. **Plugin config file** — `<project-root>/.claude/ralph-fork/config.json`, then `~/.claude/ralph-fork/config.json` (project wins). Schema: `{"model": "sonnet", "effort": "medium"}`.
+4. **Built-in default** — `sonnet` / `medium`.
+
+Every layer fails open with a loud `⚠️` warning on an invalid value and falls through to the next layer — never silently, never fails the loop. The resolved pair + each field's source are printed in the startup banner and frozen into `state.json` (`model`, `effort`, `model_source`, `effort_source`) at setup time; editing a policy/config file mid-loop does not affect it (start a new loop to pick up the change).
 
 **Iteration-1 caveat (non-worktree mode):** iteration 1 runs in the *invoking*
 session — it is not a fresh `claude` spawn, so it keeps that session's own
-model and effort. The `--model`/`--effort` values (including the defaults)
-govern forked sessions 2+ and, in `--worktree` mode, iteration 1 as well
-(worktree mode spawns even the first session via the CLI). State files written
-before v0.5.0 have no `effort` field; on resume they fall back to `medium`,
-while their `model` behavior is unchanged (unpinned stays unpinned).
+model and effort. The resolved model/effort govern forked sessions 2+ and, in
+`--worktree` mode, iteration 1 as well (worktree mode spawns even the first
+session via the CLI). State files written before v0.6.0 have no `model`/
+`effort` field at all; on resume/fork they fall back to the built-in default
+(`sonnet`/`medium`), symmetrically, with a `⚠️` warning.
 
 ---
 

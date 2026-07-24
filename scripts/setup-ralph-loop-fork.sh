@@ -33,6 +33,124 @@ _err() {
   echo "" >&2
 }
 
+# ============================================================================
+# MODEL/EFFORT RESOLUTION (3-layer default; see
+# _project/specs/feature-model-effort-3-layer-default-2026-07-24.md)
+# Precedence, highest wins: P0 explicit flag > P1 AEOS model_policy.implementation
+# > P2 plugin config file (project then user) > P3 built-in default. Model and
+# effort resolve INDEPENDENTLY. Fail-open + loud on any malformed layer value
+# (repo rule: no silent fallbacks) — falls through to the next layer with a
+# printed warning naming the source and the bad value.
+# ============================================================================
+_valid_model_charset() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+_valid_effort_enum() {
+  case "$1" in
+    low|medium|high|xhigh|max) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+_is_dated_model_id() { [[ "$1" =~ ^claude-.+-[0-9]{8}(\[.*\])?$ ]]; }
+
+MODEL_SOURCE="default"
+EFFORT_SOURCE="default"
+
+resolve_model_effort() {
+  # P0: an explicit flag already set MODEL/EFFORT during arg parsing.
+  [[ "$MODEL_EXPLICIT" == "true" ]] && MODEL_SOURCE="flag"
+  [[ "$EFFORT_EXPLICIT" == "true" ]] && EFFORT_SOURCE="flag"
+
+  # P1: AEOS model_policy.implementation — inert (no message) when the file
+  # is absent (standalone mode); a present-but-malformed value warns and
+  # falls through rather than failing the loop.
+  local aeos_file="$AEOS_PROJECT_ROOT/_project/project-settings.json"
+  if [[ -f "$aeos_file" ]]; then
+    if [[ -z "$MODEL" ]]; then
+      local aeos_model
+      aeos_model=$(jq -r '.model_policy.implementation.model // empty' "$aeos_file" 2>/dev/null) || aeos_model=""
+      if [[ -n "$aeos_model" ]]; then
+        if _valid_model_charset "$aeos_model"; then
+          MODEL="$aeos_model"
+          MODEL_SOURCE="aeos:model_policy.implementation"
+          if _is_dated_model_id "$aeos_model"; then
+            echo "⚠️  $aeos_file: model_policy.implementation.model is a dated version ('$aeos_model') — prefer a bare alias" >&2
+          fi
+        else
+          echo "⚠️  $aeos_file: model_policy.implementation.model is invalid ('$aeos_model') — ignoring, falling through" >&2
+        fi
+      fi
+    fi
+    if [[ -z "$EFFORT" ]]; then
+      local aeos_effort
+      aeos_effort=$(jq -r '.model_policy.implementation.effort // empty' "$aeos_file" 2>/dev/null) || aeos_effort=""
+      if [[ -n "$aeos_effort" ]]; then
+        if _valid_effort_enum "$aeos_effort"; then
+          EFFORT="$aeos_effort"
+          EFFORT_SOURCE="aeos:model_policy.implementation"
+        else
+          echo "⚠️  $aeos_file: model_policy.implementation.effort is invalid ('$aeos_effort') — ignoring, falling through" >&2
+        fi
+      fi
+    fi
+  fi
+
+  # P2: plugin config file — project location wins over user location.
+  local project_config="$AEOS_PROJECT_ROOT/.claude/ralph-fork/config.json"
+  local user_config="$HOME/.claude/ralph-fork/config.json"
+  local cfg label
+  for cfg in "$project_config" "$user_config"; do
+    [[ -f "$cfg" ]] || continue
+    label="config:project"
+    [[ "$cfg" == "$user_config" ]] && label="config:user"
+
+    if [[ -z "$MODEL" ]]; then
+      local cfg_model
+      cfg_model=$(jq -r '.model // empty' "$cfg" 2>/dev/null) || cfg_model=""
+      if [[ -n "$cfg_model" ]]; then
+        if _valid_model_charset "$cfg_model"; then
+          MODEL="$cfg_model"
+          MODEL_SOURCE="$label"
+          if _is_dated_model_id "$cfg_model"; then
+            echo "⚠️  $cfg: model is a dated version ('$cfg_model') — prefer a bare alias" >&2
+          fi
+        else
+          echo "⚠️  $cfg: invalid model value ('$cfg_model') — ignoring" >&2
+        fi
+      fi
+    fi
+
+    if [[ -z "$EFFORT" ]]; then
+      local cfg_effort
+      cfg_effort=$(jq -r '.effort // empty' "$cfg" 2>/dev/null) || cfg_effort=""
+      if [[ -n "$cfg_effort" ]]; then
+        if _valid_effort_enum "$cfg_effort"; then
+          EFFORT="$cfg_effort"
+          EFFORT_SOURCE="$label"
+        else
+          echo "⚠️  $cfg: invalid effort value ('$cfg_effort') — ignoring" >&2
+        fi
+      fi
+    fi
+  done
+
+  # P3: built-in default.
+  if [[ -z "$MODEL" ]]; then
+    MODEL="$DEFAULT_MODEL"
+    MODEL_SOURCE="default"
+  fi
+  if [[ -z "$EFFORT" ]]; then
+    EFFORT="$DEFAULT_EFFORT"
+    EFFORT_SOURCE="default"
+  fi
+
+  # Defensive: a resolver bug must fail loudly, never spawn with no flag at
+  # all (that would be worse than the original leak — no --model means the
+  # ambient user-settings model wins silently).
+  if [[ -z "$MODEL" ]] || [[ -z "$EFFORT" ]]; then
+    _err "Internal error: model/effort resolution produced an empty value" "model='$MODEL' effort='$EFFORT'" "This is a ralph-loop-fork bug — please report it."
+    exit 1
+  fi
+}
+
 # Parse arguments
 CHECKLIST_FILE=""
 COMMAND=""
@@ -50,8 +168,21 @@ WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 COPY_PATHS=""
-MODEL="sonnet"
-EFFORT="medium"
+# P3 built-in default — single source of truth; scripts/fork-terminal.sh's
+# read-back fallback reuses the SAME values (kept in sync by
+# tests/test-model-resolution.sh). Consumers: resolve_model_effort() below,
+# fork-terminal.sh legacy-state fallback.
+DEFAULT_MODEL="sonnet"
+DEFAULT_EFFORT="medium"
+
+# P0: empty until an explicit --model/--effort flag sets both the value and
+# its *_EXPLICIT marker. An empty value here is NOT yet "resolved" — it is
+# resolved once by resolve_model_effort() below (P1 AEOS > P2 config > P3
+# default), and MUST NOT be used to spawn a session before that call runs.
+MODEL=""
+EFFORT=""
+MODEL_EXPLICIT=false
+EFFORT_EXPLICIT=false
 
 # Parse options and positional arguments
 while [[ $# -gt 0 ]]; do
@@ -87,13 +218,20 @@ OPTIONS:
                              (space-separated inside a single quoted arg)
   --model <name>             Pin the Claude model for all SPAWNED sessions
                              (e.g., sonnet, opus, haiku, or a full model id).
-                             Default: sonnet.
   --effort <level>           Pin the reasoning effort for all SPAWNED sessions
-                             (low|medium|high|xhigh|max). Default: medium.
+                             (low|medium|high|xhigh|max).
+                             Model/effort resolve independently through 4
+                             layers, highest wins: explicit flag above > AEOS
+                             model_policy.implementation (project-settings.json,
+                             when present) > plugin config file
+                             (.claude/ralph-fork/config.json, project then
+                             user) > built-in default (sonnet/medium). The
+                             resolved pair + source of each is printed in the
+                             startup banner and frozen into state.json.
                              Non-worktree mode caveat (both flags): iteration 1
                              runs in the invoking session and keeps ITS
-                             model/effort; defaults govern forked sessions 2+
-                             and worktree-mode iteration 1.
+                             model/effort; the resolved values govern forked
+                             sessions 2+ and worktree-mode iteration 1.
   --resume                   Resume from previous fork (internal use)
   --session <n>              Session number (internal use)
   -h, --help                 Show this help message
@@ -329,6 +467,7 @@ HELP_EOF
         exit 1
       fi
       MODEL="$2"
+      MODEL_EXPLICIT=true
       shift 2
       ;;
     --effort)
@@ -348,6 +487,7 @@ HELP_EOF
           ;;
       esac
       EFFORT="$2"
+      EFFORT_EXPLICIT=true
       shift 2
       ;;
     *)
@@ -379,6 +519,15 @@ if [[ "$WORKTREE" == "true" ]] && ! command -v claude >/dev/null 2>&1; then
     "It is launched via tmux — ensure 'claude' is available in your shell." \
     "Run /ralph-loop-fork:init-ralph-fork --check-only to verify all dependencies."
   exit 1
+fi
+
+# Resolve project root once (used by both AEOS gate config below and the
+# model/effort resolver) and run the resolver — but only for a fresh loop;
+# --resume reads the already-resolved model/effort back from state.json
+# (resolution happens ONCE at setup time, frozen into state.json).
+AEOS_PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+if [[ "$RESUME" != "true" ]]; then
+  resolve_model_effort
 fi
 
 # Build PROMPT from checklist and command
@@ -561,6 +710,8 @@ else
   "stop_hook_reminders": $STOP_HOOK_REMINDERS_JSON,
   "model": $MODEL_JSON,
   "effort": $EFFORT_JSON,
+  "model_source": "$MODEL_SOURCE",
+  "effort_source": "$EFFORT_SOURCE",
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "fork_history": [],
   "awaiting_checklist_update": false,
@@ -575,7 +726,7 @@ else
 EOF
 
   # W1: sentinel-guarded AEOS config generation — fail-open (W4)
-  AEOS_PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  # (AEOS_PROJECT_ROOT already resolved above, before the model/effort resolver)
   if [[ -f "$AEOS_PROJECT_ROOT/.claude/scripts/ralph_aeos_config.py" ]]; then
     if ! python3 "$AEOS_PROJECT_ROOT/.claude/scripts/ralph_aeos_config.py" \
         --checklist "$CHECKLIST_FILE" \
@@ -595,6 +746,7 @@ EOF
   echo "Completion promise: $(if [[ "$COMPLETION_PROMISE" != "null" ]]; then echo "$COMPLETION_PROMISE"; else echo "none (runs until budget)"; fi)"
   echo "On-completion: $(if [[ -n "$ON_COMPLETION_CMD" ]]; then echo "$ON_COMPLETION_CMD"; else echo "none"; fi)"
   echo "Stop-hook-reminders: $(if [[ -n "$STOP_HOOK_REMINDERS" ]]; then echo "configured (${#STOP_HOOK_REMINDERS} chars)"; else echo "none"; fi)"
+  echo "Model: $MODEL ($MODEL_SOURCE), Effort: $EFFORT ($EFFORT_SOURCE)"
   echo ""
   echo "State directory: $LOOP_DIR"
   echo ""
@@ -789,15 +941,22 @@ if [[ "$WORKTREE" == "true" ]]; then
   # Launch the initial Claude session inside the worktree.
   SESSION_NAME="ralph-$LOOP_ID-1"
   INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
-  MODEL_FLAG=""
-  if [[ -n "$MODEL" ]]; then
-    MODEL_FLAG=" --model $MODEL"
+  # MODEL/EFFORT are resolved (never empty) by resolve_model_effort() above —
+  # assert defensively so a resolver regression can never silently spawn with
+  # no flag (worse than the original leak: the ambient user-settings model
+  # would win instead).
+  if [[ -z "$MODEL" ]] || [[ -z "$EFFORT" ]]; then
+    _err "Refusing to spawn: model/effort resolved empty" "model='$MODEL' effort='$EFFORT'"
+    exit 1
   fi
-  EFFORT_FLAG=""
-  if [[ -n "$EFFORT" ]]; then
-    EFFORT_FLAG=" --effort $EFFORT"
-  fi
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
+  MODEL_FLAG=" --model $MODEL"
+  EFFORT_FLAG=" --effort $EFFORT"
+  # Unset ANTHROPIC_MODEL/CLAUDE_CODE_EFFORT_LEVEL — the tmux server's global
+  # environment can otherwise carry a leaked model/effort into the spawned
+  # session on any path where the explicit flag were ever missing. Do NOT
+  # unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate alias redirections
+  # (e.g. Bedrock).
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.

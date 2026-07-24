@@ -142,21 +142,28 @@ else
 fi
 
 echo ""
-echo -e "${YELLOW}Test 2: old state.json without effort key → --effort medium fallback, no crash${NC}"
+echo -e "${YELLOW}Test 2: old state.json without model/effort keys -> BOTH fall back to the${NC}"
+echo -e "${YELLOW}  built-in default (sonnet/medium), symmetrically, with a warning (AC1 fix)${NC}"
 
-# Test 1's state.json predates the effort field entirely (and has no model
-# pin). The spawn must still succeed and default effort to medium, while
-# leaving the model unpinned (resumed old loops keep their model behavior).
+# Before the fix, a missing model key fell back to "no --model flag at all"
+# (the leak: the spawned session inherited whatever model another session
+# last persisted to user settings). The fix makes model symmetric with
+# effort: fall back to the SAME built-in default, loudly, on both.
 SPAWN2_LINE=$(grep "new-session" "$TMUX_LOG" | grep "ralph-${LOOP_ID}-2")
-if grep -qE -- '\-\-effort\\? medium' <<< "$SPAWN2_LINE"; then
+if grep -qE -- '--effort.? medium' <<< "$SPAWN2_LINE"; then
   pass "FORK_CMD contains --effort medium (missing-key fallback)"
 else
   fail "FORK_CMD missing --effort medium fallback" "$SPAWN2_LINE"
 fi
-if ! grep -q -- "--model" <<< "$SPAWN2_LINE"; then
-  pass "Unpinned old state stays unpinned (no --model injected)"
+if grep -qE -- '--model.? sonnet' <<< "$SPAWN2_LINE"; then
+  pass "FORK_CMD contains --model sonnet (missing-key fallback, symmetric with effort - AC1)"
 else
-  fail "--model unexpectedly injected for model-less state" "$SPAWN2_LINE"
+  fail "--model sonnet fallback missing for model-less state (this is the leak)" "$SPAWN2_LINE"
+fi
+if grep -q "no model in" <<< "$OUTPUT"; then
+  pass "Warned about missing model in state.json before falling back"
+else
+  fail "Expected a warning about missing model in state.json" "$OUTPUT"
 fi
 
 echo ""
