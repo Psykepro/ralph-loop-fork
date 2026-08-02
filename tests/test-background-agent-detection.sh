@@ -169,7 +169,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 2: 2 pending background agents → BLOCK with bg-agent reason"
+section "Test 2: 2 pending background agents → defer silently (no block, empty output)"
 LOOP="test-bg-2"
 make_state "$LOOP"
 make_local "$LOOP"
@@ -177,15 +177,10 @@ T=$(mktemp "$TEST_DIR/t2.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 2 0 "I launched the agents"
 
 OUTPUT=$(run_hook "$LOOP" "$T" false)
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null)
-  if echo "$REASON" | grep -qi "background"; then
-    pass "Correctly blocked for 2 pending background agents"
-  else
-    fail "Blocked but reason doesn't mention background agents: $REASON"
-  fi
+if [[ -z "$OUTPUT" ]]; then
+  pass "Correctly defers (silent, no output) for 2 pending background agents"
 else
-  fail "Expected BLOCK for pending background agents, got: $OUTPUT"
+  fail "Expected silent defer for pending background agents, got: $OUTPUT"
 fi
 
 # Verify state was updated
@@ -202,7 +197,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 3: 2 launched, 1 resolved → still blocks (1 pending)"
+section "Test 3: 2 launched, 1 resolved → still defers (1 pending)"
 LOOP="test-bg-3"
 make_state "$LOOP"
 make_local "$LOOP"
@@ -210,11 +205,10 @@ T=$(mktemp "$TEST_DIR/t3.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 2 1 "One agent done"
 
 OUTPUT=$(run_hook "$LOOP" "$T" false)
-REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null || echo "")
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1 && echo "$REASON" | grep -qi "background"; then
-  pass "Correctly blocks when 1 of 2 agents still pending"
+if [[ -z "$OUTPUT" ]]; then
+  pass "Correctly defers when 1 of 2 agents still pending"
 else
-  fail "Expected BLOCK for 1 pending agent, got: $OUTPUT"
+  fail "Expected silent defer for 1 pending agent, got: $OUTPUT"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +228,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 5: Continuation cycle with awaiting_background_agents=true, still pending → re-block"
+section "Test 5: Continuation cycle with awaiting_background_agents=true, still pending → re-defer"
 LOOP="test-bg-5"
 make_state "$LOOP" true 1
 make_local "$LOOP"
@@ -242,11 +236,10 @@ T=$(mktemp "$TEST_DIR/t5.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 2 0 "Still waiting for agents"
 
 OUTPUT=$(run_hook "$LOOP" "$T" true)
-REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null || echo "")
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1 && echo "$REASON" | grep -qi "background"; then
-  pass "Correctly re-blocks in continuation cycle for still-pending agents"
+if [[ -z "$OUTPUT" ]]; then
+  pass "Correctly re-defers in continuation cycle for still-pending agents"
 else
-  fail "Expected re-block in continuation cycle, got: $OUTPUT"
+  fail "Expected silent re-defer in continuation cycle, got: $OUTPUT"
 fi
 
 STATE=$(cat "$TEST_DIR/.claude/ralph-fork/$LOOP/state.json")
@@ -280,7 +273,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 7: High wait count (e.g. 10) with agents still pending → still re-blocks (no cap)"
+section "Test 7: High wait count (e.g. 10) with agents still pending → still re-defers (no cap)"
 LOOP="test-bg-7"
 make_state "$LOOP" true 10
 make_local "$LOOP"
@@ -288,11 +281,10 @@ T=$(mktemp "$TEST_DIR/t7.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 4 0 "Still waiting, no cap"
 
 OUTPUT=$(run_hook "$LOOP" "$T" true)
-REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null || echo "")
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1 && echo "$REASON" | grep -qi "background"; then
-  pass "Correctly re-blocks even at high wait count (no cap) — waits for all agents"
+if [[ -z "$OUTPUT" ]]; then
+  pass "Correctly re-defers even at high wait count (no cap) — waits for all agents"
 else
-  fail "Expected continued re-block at high wait count, got: $OUTPUT"
+  fail "Expected continued silent re-defer at high wait count, got: $OUTPUT"
 fi
 
 STATE=$(cat "$TEST_DIR/.claude/ralph-fork/$LOOP/state.json")
@@ -303,7 +295,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 8 (AC1): native background_tasks non-empty (modern CC) → BLOCK"
+section "Test 8 (AC1): native background_tasks non-empty (modern CC) → defer"
 LOOP="test-bg-8"
 make_state "$LOOP"
 make_local "$LOOP"
@@ -311,15 +303,10 @@ T=$(mktemp "$TEST_DIR/t8.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 0 0 "No promise here"
 
 OUTPUT=$(run_hook "$LOOP" "$T" false '[{"id":"a1","type":"subagent","status":"running","description":"x","agent_type":"general-purpose"}]')
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null)
-  if echo "$REASON" | grep -qi "background"; then
-    pass "Native background_tasks presence correctly blocks (AC1)"
-  else
-    fail "Blocked but reason doesn't mention background agents: $REASON"
-  fi
+if [[ -z "$OUTPUT" ]]; then
+  pass "Native background_tasks presence correctly defers (AC1)"
 else
-  fail "Expected BLOCK for non-empty background_tasks, got: $OUTPUT"
+  fail "Expected silent defer for non-empty background_tasks, got: $OUTPUT"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,8 +326,8 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 10 (AC2, [redacted] scenario): background_tasks empty (agent just finished) BUT a"
-section "  task-notification is enqueued AFTER the last assistant message → still BLOCK"
+section "Test 10 (AC2, finish-vs-integrate race): background_tasks empty (agent just finished) BUT a"
+section "  task-notification is enqueued AFTER the last assistant message → still defer"
 LOOP="test-bg-10"
 make_state "$LOOP"
 make_local "$LOOP"
@@ -357,15 +344,10 @@ T=$(mktemp "$TEST_DIR/t10.XXXXXX.jsonl")
 } > "$T"
 
 OUTPUT=$(run_hook "$LOOP" "$T" false '[]')
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null)
-  if echo "$REASON" | grep -qi "background"; then
-    pass "D2.2 correctly blocks on undelivered notification even though background_tasks is empty (AC2)"
-  else
-    fail "Blocked but reason doesn't mention background agents: $REASON"
-  fi
+if [[ -z "$OUTPUT" ]]; then
+  pass "D2.2 correctly defers on undelivered notification even though background_tasks is empty (AC2)"
 else
-  fail "Expected BLOCK for undelivered notification ([redacted] race), got: $OUTPUT"
+  fail "Expected silent defer for undelivered notification, got: $OUTPUT"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,15 +360,10 @@ T=$(mktemp "$TEST_DIR/t11.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 1 0 "Still launching"
 
 OUTPUT=$(run_hook "$LOOP" "$T" false)
-if echo "$OUTPUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  REASON=$(echo "$OUTPUT" | jq -r '.reason' 2>/dev/null)
-  if echo "$REASON" | grep -qi "background"; then
-    pass "Legacy fallback (no background_tasks key) still catches pending agent (AC3)"
-  else
-    fail "Blocked but reason doesn't mention background agents: $REASON"
-  fi
+if [[ -z "$OUTPUT" ]]; then
+  pass "Legacy fallback (no background_tasks key) still catches pending agent, defers (AC3)"
 else
-  fail "Expected BLOCK from legacy fallback, got: $OUTPUT"
+  fail "Expected silent defer from legacy fallback, got: $OUTPUT"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

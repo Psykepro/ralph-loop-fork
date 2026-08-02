@@ -39,14 +39,6 @@ info() {
 # LOG ROTATION
 # ============================================================================
 LOG_RETENTION_DAYS="${RALPH_LOG_RETENTION_DAYS:-90}"
-# How long the hook sleeps (inside itself) before re-emitting a "still
-# waiting on background agents" block. Without this, each block/re-stop
-# round-trip is near-instant — the model has nothing else to do, so it
-# immediately re-stops, producing dozens of near-duplicate "wait #N"
-# messages per minute (INC: postmortem-resume bg-agent spam). Sleeping
-# here throttles the hook-fire rate itself, so the same real wait produces
-# far fewer visible cycles. Configurable since agent runtimes vary.
-BG_AGENT_POLL_INTERVAL_SECONDS="${RALPH_BG_POLL_INTERVAL_SECONDS:-15}"
 # Log directory is configurable via RALPH_FORK_LOG_DIR; defaults to
 # ${TMPDIR:-/tmp}/ralph-fork-logs for portability across macOS and Linux.
 LOG_DIR="${RALPH_FORK_LOG_DIR:-${TMPDIR:-/tmp}/ralph-fork-logs}"
@@ -697,7 +689,7 @@ count_pending_background_agents() {
 # appearing AFTER the last assistant message line in the transcript) is ALWAYS
 # run in addition, unconditionally — background_tasks is already empty in the
 # window between a sub-agent finishing and its result being integrated by the
-# model (the [redacted] incident's actual race, AC2). Presence alone would miss it.
+# model (AC2: the finish-vs-integrate race). Presence alone would miss it.
 #
 # The legacy transcript matcher (count_pending_background_agents, above) is
 # used ONLY when the `background_tasks` key is entirely absent from hook
@@ -1191,27 +1183,23 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
 
     exit 0
   elif [[ "$AWAITING_BACKGROUND_AGENTS" == "true" ]]; then
-    # We previously blocked waiting for background agents — re-check if they're done.
-    # No cap: keep blocking until every started agent delivers its result.
+    # We're deferring for background agents — re-check if they're done.
+    # DEFER, DON'T BLOCK (v0.8.0): a `decision:block` here forces an immediate
+    # re-stop with nothing for the model to do between cycles — that produced
+    # visible wait-#N spam. Deferring instead (silent exit 0, turn ends) lets
+    # the pending task-notification resume the session naturally when it
+    # lands; the next Stop hook fire re-checks fresh.
+    # RISK (unverified): the block existed to close the AC2 finish-vs-integrate
+    # race documented above compute_pending_background_work() — no reproduction
+    # was re-confirmed before switching to defer. If bg-agent results start
+    # going missing after this change, that race is the first suspect —
+    # revert to block-and-poll.
     debug_log "CONTINUATION: awaiting_background_agents=true - re-checking"
     PENDING_BG_CONT=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
     if [[ $PENDING_BG_CONT -gt 0 ]]; then
       NEW_BG_COUNT=$((BG_AGENT_BLOCK_COUNT + 1))
       update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
-      debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (wait #$NEW_BG_COUNT)"
-      info "Ralph Loop Fork [$LOOP_ID]: $PENDING_BG_CONT background agent(s) still running (wait #$NEW_BG_COUNT)..."
-      info ""
-      # Throttle re-fire rate — see BG_AGENT_POLL_INTERVAL_SECONDS above.
-      sleep "$BG_AGENT_POLL_INTERVAL_SECONDS"
-      jq -n \
-        --argjson n "$PENDING_BG_CONT" \
-        --argjson attempt "$NEW_BG_COUNT" \
-        --arg loopid "$LOOP_ID" \
-        '{
-          "decision": "block",
-          "reason": ("Ralph Loop [\($loopid)]: \($n) background sub-agent(s) still running (wait #\($attempt)). Do NOT update the checklist or output the completion promise yet. Wait until ALL task-notification messages have been received, then integrate all results."),
-          "systemMessage": ("Ralph [\($loopid)]: \($n) background agents still pending")
-        }'
+      debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (defer #$NEW_BG_COUNT) - deferring silently, no block"
       exit 0
     else
       debug_log "BG AGENTS: All resolved in continuation cycle — resuming normal flow"
@@ -1308,24 +1296,15 @@ fi
 
 # ============================================================================
 # BACKGROUND AGENT DETECTION (RUNNING STATE)
-# Block instead of forking until every launched background agent has delivered
-# its task-notification result. No cap — waits for all agents regardless of
-# how many were started.
+# DEFER, DON'T BLOCK (v0.8.0): defer silently instead of emitting
+# decision:block — see the AWAITING_BACKGROUND_AGENTS continuation branch
+# above for the full rationale and the accepted, unverified risk.
+# No cap — waits for all agents regardless of how many were started.
 # ============================================================================
 BG_PENDING=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
 if [[ $BG_PENDING -gt 0 ]]; then
-  debug_log "RUNNING: $BG_PENDING pending background agents detected — BLOCKING"
-  info "Ralph Loop Fork [$LOOP_ID]: $BG_PENDING background agent(s) still running — waiting for results..."
-  info ""
+  debug_log "RUNNING: $BG_PENDING pending background agents detected — deferring silently, no block"
   update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
-  jq -n \
-    --argjson n "$BG_PENDING" \
-    --arg loopid "$LOOP_ID" \
-    '{
-      "decision": "block",
-      "reason": ("Ralph Loop [\($loopid)]: You have \($n) background sub-agent(s) whose results have NOT been received yet. Do NOT update the checklist or output the completion promise. Wait for all task-notification messages, then collect and integrate all results before continuing."),
-      "systemMessage": ("Ralph [\($loopid)]: \($n) background agents pending — wait for completion")
-    }'
   exit 0
 fi
 
