@@ -39,6 +39,14 @@ info() {
 # LOG ROTATION
 # ============================================================================
 LOG_RETENTION_DAYS="${RALPH_LOG_RETENTION_DAYS:-90}"
+# How long the hook sleeps (inside itself) before re-emitting a "still
+# waiting on background agents" block. Without this, each block/re-stop
+# round-trip is near-instant — the model has nothing else to do, so it
+# immediately re-stops, producing dozens of near-duplicate "wait #N"
+# messages per minute (INC: postmortem-resume bg-agent spam). Sleeping
+# here throttles the hook-fire rate itself, so the same real wait produces
+# far fewer visible cycles. Configurable since agent runtimes vary.
+BG_AGENT_POLL_INTERVAL_SECONDS="${RALPH_BG_POLL_INTERVAL_SECONDS:-15}"
 # Log directory is configurable via RALPH_FORK_LOG_DIR; defaults to
 # ${TMPDIR:-/tmp}/ralph-fork-logs for portability across macOS and Linux.
 LOG_DIR="${RALPH_FORK_LOG_DIR:-${TMPDIR:-/tmp}/ralph-fork-logs}"
@@ -1193,6 +1201,8 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
       debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (wait #$NEW_BG_COUNT)"
       info "Ralph Loop Fork [$LOOP_ID]: $PENDING_BG_CONT background agent(s) still running (wait #$NEW_BG_COUNT)..."
       info ""
+      # Throttle re-fire rate — see BG_AGENT_POLL_INTERVAL_SECONDS above.
+      sleep "$BG_AGENT_POLL_INTERVAL_SECONDS"
       jq -n \
         --argjson n "$PENDING_BG_CONT" \
         --argjson attempt "$NEW_BG_COUNT" \
