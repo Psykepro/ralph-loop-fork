@@ -119,7 +119,10 @@ def test_release_by_non_holder_is_noop():
 
 def test_build_launch_argv_uses_worktree_flag_never_raw_git():
     subs = cl.parse_execution_order(SINGLE_DEP_MASTER)
-    argv = cl.build_launch_argv(2, subs[2], Path("/tmp/plan-dir"), "coop-x", script_path=Path("/fake/setup-ralph-loop-fork.sh"))
+    argv = cl.build_launch_argv(
+        2, subs[2], Path("/tmp/plan-dir"), "coop-x", "feature/parent-x",
+        script_path=Path("/fake/setup-ralph-loop-fork.sh"),
+    )
     assert argv[0] == "/fake/setup-ralph-loop-fork.sh"
     assert "--worktree" in argv
     assert "git" not in argv
@@ -127,6 +130,19 @@ def test_build_launch_argv_uses_worktree_flag_never_raw_git():
     assert "--checklist" in argv
     assert str(Path("/tmp/plan-dir") / "sub-02-y.md") in argv
     assert "coop-x-sub02" in argv
+
+
+def test_build_launch_argv_forwards_parent_branch_as_base_ref():
+    """Base-branch-tracking fix: every sibling must fork from the parent feature's own
+    branch, never from primary's ambient HEAD at spawn time -- see module docstring."""
+    subs = cl.parse_execution_order(SINGLE_DEP_MASTER)
+    argv = cl.build_launch_argv(
+        2, subs[2], Path("/tmp/plan-dir"), "coop-x", "feature/parent-x",
+        script_path=Path("/fake/setup-ralph-loop-fork.sh"),
+    )
+    assert "--base-ref" in argv
+    idx = argv.index("--base-ref")
+    assert argv[idx + 1] == "feature/parent-x"
 
 
 def test_launch_sibling_injects_run_callable():
@@ -168,6 +184,7 @@ def test_main_dry_run_launches_nothing(tmp_path, capsys):
         [
             "--master-checklist", str(master),
             "--coop-id", "test-coop",
+            "--parent-branch", "feature/parent-x",
             "--state-dir", str(tmp_path / "state"),
             "--dry-run",
         ],
@@ -199,15 +216,19 @@ def test_main_launches_ready_set_and_persists_state(tmp_path):
         [
             "--master-checklist", str(master),
             "--coop-id", "test-coop",
+            "--parent-branch", "feature/parent-x",
             "--state-dir", str(state_dir),
         ],
         run=fake_run,
     )
     assert rc == 0
     assert len(calls) == 1  # only sub-1 is ready (sub-2 blockedBy 1)
+    assert "--base-ref" in calls[0]
+    assert calls[0][calls[0].index("--base-ref") + 1] == "feature/parent-x"
 
     state = cl.load_cooperative_state(state_dir / "cooperative-state.json")
     assert "1" in state["launched"]
+    assert state["base_branch"] == "feature/parent-x"
 
 
 def test_main_no_ready_subs_returns_zero(tmp_path, capsys):
@@ -218,6 +239,7 @@ def test_main_no_ready_subs_returns_zero(tmp_path, capsys):
         [
             "--master-checklist", str(master),
             "--coop-id", "test-coop",
+            "--parent-branch", "feature/parent-x",
             "--merged", "1,2",
             "--state-dir", str(tmp_path / "state"),
         ],
@@ -225,3 +247,47 @@ def test_main_no_ready_subs_returns_zero(tmp_path, capsys):
     )
     assert rc == 0
     assert "no ready sub-checklists" in capsys.readouterr().out
+
+
+def test_parent_branch_flag_is_required(tmp_path):
+    master = tmp_path / "MASTER-CHECKLIST.md"
+    master.write_text(SINGLE_DEP_MASTER)
+
+    with pytest.raises(SystemExit):
+        cl.main_with_args(
+            [
+                "--master-checklist", str(master),
+                "--coop-id", "test-coop",
+                "--state-dir", str(tmp_path / "state"),
+                "--dry-run",
+            ],
+            run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch")),
+        )
+
+
+def test_mismatched_base_branch_on_existing_state_errors_instead_of_overwriting(tmp_path):
+    master = tmp_path / "MASTER-CHECKLIST.md"
+    master.write_text(SINGLE_DEP_MASTER)
+    state_dir = tmp_path / "state"
+    state_path = state_dir / "cooperative-state.json"
+
+    # Seed an existing cooperative-state.json for a DIFFERENT parent branch.
+    cl.save_cooperative_state(
+        state_path,
+        {"merged": [], "launched": {}, "merge_lock": None, "base_branch": "feature/other-branch"},
+    )
+
+    rc = cl.main_with_args(
+        [
+            "--master-checklist", str(master),
+            "--coop-id", "test-coop",
+            "--parent-branch", "feature/parent-x",
+            "--state-dir", str(state_dir),
+        ],
+        run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch when base_branch mismatches")),
+    )
+    assert rc == 2
+
+    # State file must be untouched -- no silent overwrite of the mismatched value.
+    state = cl.load_cooperative_state(state_path)
+    assert state["base_branch"] == "feature/other-branch"
