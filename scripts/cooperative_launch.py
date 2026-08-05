@@ -142,6 +142,35 @@ def release_merge_lock(state: dict, sub_id: int) -> None:
         state["merge_lock"] = None
 
 
+def merge_target_reminder(parent_branch: str) -> str:
+    """Stop-hook-reminder text telling a spawned sibling session its Exit Gate must
+    target `parent_branch`, not the repo's default branch.
+
+    `--base-ref` (see module docstring) only controls where the sibling's worktree
+    branch FORKS FROM -- it does not touch what `worktree-teardown.md`'s Exit Gate
+    does at merge time (steps 5/8/9: `git merge origin/<default-branch>`, `gh pr
+    create` into `<default-branch>`, `gh pr merge`). Left unset, a cooperative
+    sibling's Exit Gate reconciles against and opens its PR into the repo's actual
+    default branch (e.g. `main`) instead of the parent feature branch it was spawned
+    from -- silently wrong for the cooperative case, where siblings must land on the
+    parent feature branch and the PARENT's own Exit Gate (not this script) is what
+    later merges the parent into the real default branch. `--stop-hook-reminders` is
+    the existing mechanism for injecting this into every prompt the sibling session
+    sees (initial + all forked + all stop-hook BLOCK prompts) without needing a new
+    ralph-loop-fork CLI flag."""
+    return (
+        f"COOPERATIVE SIBLING: this worktree is a sibling of the parent feature "
+        f"branch `{parent_branch}`, spawned by cooperative_launch.py. Your "
+        f"worktree-teardown.md Exit Gate MUST reconcile against and open/merge its "
+        f"PR into `{parent_branch}` -- NOT the repository's default branch. "
+        f"Concretely: step 5 is `git fetch origin {parent_branch}` then "
+        f"`git merge origin/{parent_branch}`; step 8 is `gh pr create --base "
+        f"{parent_branch}` (never omit --base, which would default to the repo's "
+        f"actual default branch); step 9 merges that PR into `{parent_branch}`, not "
+        f"into the repo default branch."
+    )
+
+
 def build_launch_argv(
     sub_id: int,
     sub_info: dict,
@@ -153,9 +182,13 @@ def build_launch_argv(
     """Build the argv for launching one ready sub-checklist as a sibling worktree
     loop via `setup-ralph-loop-fork.sh --worktree` -- never raw `git worktree add`.
 
-    `parent_branch` is always forwarded as `--base-ref <parent_branch>` so the sibling
-    forks from the parent feature's own branch instead of inheriting primary's ambient
-    HEAD at spawn time -- see the base-branch-tracking fix in the module docstring."""
+    `parent_branch` is forwarded two ways: as `--base-ref <parent_branch>` so the
+    sibling's worktree branch FORKS FROM the parent feature's own branch instead of
+    inheriting primary's ambient HEAD at spawn time (see the base-branch-tracking fix
+    in the module docstring), and as `--stop-hook-reminders` text (see
+    `merge_target_reminder`) so the sibling's own Exit Gate reconciles against and
+    merges its PR INTO that same parent branch, not the repo's default branch --
+    `--base-ref` alone only fixes the fork point, not the merge target."""
     script = str(script_path or DEFAULT_RALPH_SCRIPT)
     checklist_path = str(checklist_dir / sub_info["checklist"])
     loop_name = f"{coop_id}-sub{sub_id:02d}"
@@ -166,6 +199,7 @@ def build_launch_argv(
         "--name", loop_name,
         "--worktree",
         "--base-ref", parent_branch,
+        "--stop-hook-reminders", merge_target_reminder(parent_branch),
     ]
 
 

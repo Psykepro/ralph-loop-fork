@@ -145,6 +145,28 @@ def test_build_launch_argv_forwards_parent_branch_as_base_ref():
     assert argv[idx + 1] == "feature/parent-x"
 
 
+def test_build_launch_argv_forwards_stop_hook_reminders_for_merge_target():
+    """--base-ref alone only fixes the fork point; the sibling's Exit Gate would still
+    default to the repo's default branch for reconcile/PR/merge without this."""
+    subs = cl.parse_execution_order(SINGLE_DEP_MASTER)
+    argv = cl.build_launch_argv(
+        2, subs[2], Path("/tmp/plan-dir"), "coop-x", "feature/parent-x",
+        script_path=Path("/fake/setup-ralph-loop-fork.sh"),
+    )
+    assert "--stop-hook-reminders" in argv
+    idx = argv.index("--stop-hook-reminders")
+    reminder = argv[idx + 1]
+    assert "feature/parent-x" in reminder
+    assert "gh pr create --base feature/parent-x" in reminder
+
+
+def test_merge_target_reminder_names_all_three_exit_gate_steps():
+    reminder = cl.merge_target_reminder("feature/parent-x")
+    assert "git merge origin/feature/parent-x" in reminder
+    assert "gh pr create --base feature/parent-x" in reminder
+    assert "feature/parent-x" in reminder
+
+
 def test_launch_sibling_injects_run_callable():
     calls = []
 
