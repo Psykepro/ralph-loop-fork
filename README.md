@@ -201,12 +201,13 @@ the main branch is never touched until you choose to merge.
   --on-completion "/reflect-learn" \
   --total-budget 30 \
   --worktree \
+  --base-ref main \
   --copy-paths "docs/specs notes/research"
 ```
 
 **What happens:**
 
-1. `git worktree add .worktrees/feat-x -b ralph/feat-x` creates the worktree on a new branch.
+1. `git worktree add .worktrees/feat-x -b ralph/feat-x main` creates the worktree on a new branch forked from `--base-ref` (here `main`).
 2. A curated set of files is copied in: `CLAUDE.md`, `.claude/skills`, `.claude/commands`, `.claude/settings*.json`, `.claude/ralph-fork/` (excluding `.archive/`), the checklist directory, every `.env*` file at the root, plus anything from `--copy-paths`.
 3. The freshly-created loop state directory is moved into the worktree.
 4. The initial Claude session is launched inside the worktree via tmux. All forked sessions continue running there — `fork-terminal.sh` and `stop-hook-fork.sh` need zero changes to follow along.
@@ -225,11 +226,13 @@ the main branch is never touched until you choose to merge.
 | `--no-worktree` | (default) | Explicit opt-out |
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name to create |
+| `--base-ref <ref>` | **required with `--worktree`** | The ref new sibling worktree branches fork from; no ambient-cwd default |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy in; space-separated inside a single quoted arg |
 
 **Restrictions:**
 
 - `--worktree` is **not** compatible with `--resume`. Resume runs from the existing worktree directly.
+- `--base-ref <ref>` is **required** with `--worktree` — no default, never the invoking cwd's ambient HEAD. Omitting it fails loudly (❌ ERROR block) before anything is created.
 - The worktree itself is **not** auto-removed by `cancel-ralph-fork` — you may want to inspect or merge it first. The cancel command prints the exact cleanup commands.
 
 ### Post-completion merge workflow
@@ -272,6 +275,7 @@ in the loop's `state.json`.
 | `--no-worktree` | (default) | Explicit opt-out; documents intent |
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree (only with `--worktree`) |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name for the worktree (only with `--worktree`) |
+| `--base-ref <ref>` | **required with `--worktree`** | The ref new sibling worktree branches fork from; no ambient-cwd default |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy into the worktree, space-separated inside one quoted arg |
 | `--model <name>` | resolved | Pin the Claude model for all spawned sessions (e.g. `sonnet`, `opus`, or a full model id) |
 | `--effort <level>` | resolved | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) |

@@ -1,6 +1,6 @@
 ---
 description: "Start fork-based Ralph Loop (spawns new terminal each iteration)"
-argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup] [--worktree] [--worktree-base DIR] [--branch NAME] [--copy-paths \"P1 P2\"] [--model NAME] [--effort LEVEL]"
+argument-hint: "--checklist <path> [--command CMD] [--name ID] [--completion-promise TEXT] [--on-completion CMD] [--stop-hook-reminders TEXT|PATH] [--total-budget N] [--max-per-session N] [--preserve-final-session] [--no-cleanup] [--worktree --base-ref REF] [--worktree-base DIR] [--branch NAME] [--copy-paths \"P1 P2\"] [--model NAME] [--effort LEVEL]"
 allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/setup-ralph-loop-fork.sh:*)"]
 hide-from-slash-command-tool: "true"
 ---
@@ -44,6 +44,7 @@ Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until 
 | `--worktree` | Run the loop in an isolated git worktree | false |
 | `--worktree-base <dir>` | Parent dir for the worktree (only with `--worktree`) | `.worktrees` |
 | `--branch <name>` | Branch name for the worktree (only with `--worktree`) | `ralph/<loop-id>` |
+| `--base-ref <ref>` | REQUIRED with `--worktree` — the ref new sibling worktree branches fork from; no ambient-cwd default | none |
 | `--copy-paths "<a b c>"` | Extra files/dirs to copy into the worktree (space-sep inside one quoted arg) | none |
 | `--model <name>` | Pin the Claude model for all spawned sessions (e.g., `sonnet`) | resolved (see below) |
 | `--effort <level>` | Pin the reasoning effort for all spawned sessions (`low`\|`medium`\|`high`\|`xhigh`\|`max`) | resolved (see below) |
@@ -134,17 +135,20 @@ Sessions are named `ralph-{LOOP_ID}-{N}` and managed via tmux.
   --checklist path/to/checklist.md \
   --name "feat-x" \
   --worktree \
+  --base-ref main \
   --copy-paths "_project/docs docs/specs"
 ```
 
 Behaviour:
 
-- Creates worktree at `<worktree-base>/<loop-id>` on branch `ralph/<loop-id>` (override either with `--worktree-base` and `--branch`).
+- Creates worktree at `<worktree-base>/<loop-id>` on branch `ralph/<loop-id>` (override either with `--worktree-base` and `--branch`), forked from `--base-ref`.
 - Copies CLAUDE.md, a curated subset of `.claude/` (skills, commands, settings), the checklist directory, all `.env*` files, and any `--copy-paths` entries.
 - Launches the initial Claude session via tmux pointing at the worktree. All forked sessions continue inside the worktree without further intervention.
 - `cancel-ralph-fork` detects the worktree and prints `git merge / git worktree remove / git branch -D` commands — the worktree itself is left in place so you can inspect or merge first.
 
 `--worktree` is **not** compatible with `--resume` (resume runs from the existing worktree directly).
+
+`--base-ref <ref>` is **required** with `--worktree` — no default, never the invoking cwd's ambient HEAD. Omitting it fails loudly with a `❌ ERROR` block before anything is created.
 
 ## How to Complete the Task
 

@@ -167,6 +167,7 @@ STOP_HOOK_REMINDERS=""
 WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
+BASE_REF=""
 COPY_PATHS=""
 # P3 built-in default — single source of truth; scripts/fork-terminal.sh's
 # read-back fallback reuses the SAME values (kept in sync by
@@ -214,6 +215,11 @@ OPTIONS:
   --no-worktree              Disable worktree mode (default, documents intent)
   --worktree-base <dir>      Parent dir for worktrees (default: .worktrees)
   --branch <name>            Branch name for the worktree (default: ralph/<loop-id>)
+  --base-ref <ref>           REQUIRED with --worktree. The ref the new sibling
+                             worktree's branch forks from (branch, tag, or SHA).
+                             No default — never falls back to the invoking
+                             cwd's ambient HEAD. Ignored (no behavior change)
+                             when --worktree is not passed.
   --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
                              (space-separated inside a single quoted arg)
   --model <name>             Pin the Claude model for all SPAWNED sessions
@@ -251,13 +257,15 @@ EXAMPLES:
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "csrf" --completion-promise 'ALL_COMPLETE'
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --total-budget 10
   /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --completion-promise 'DONE' --on-completion '/reflect-learn'
-  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree
-  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree --copy-paths "_project/docs docs/specs"
+  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree --base-ref main
+  /ralph-loop-fork:ralph-loop-fork --checklist checklist.md --name "feat-x" --worktree --base-ref main --copy-paths "_project/docs docs/specs"
 
 WORKTREE MODE:
   --worktree creates a git worktree at <worktree-base>/<loop-id> on branch
-  ralph/<loop-id> (override with --branch). The loop and all forked sessions
-  run inside the worktree, leaving the main branch untouched.
+  ralph/<loop-id> (override with --branch), forked from --base-ref (REQUIRED
+  with --worktree — no default, never the invoking cwd's ambient HEAD). The
+  loop and all forked sessions run inside the worktree, leaving the main
+  branch untouched.
 
   Extra files/dirs not picked up by the default copy set (CLAUDE.md, .claude/,
   the checklist dir, .env*) can be added with --copy-paths "p1 p2 p3".
@@ -447,6 +455,14 @@ HELP_EOF
       BRANCH_NAME="$2"
       shift 2
       ;;
+    --base-ref)
+      if [[ -z "${2:-}" ]]; then
+        _err "--base-ref requires a ref argument" "Example: --base-ref main"
+        exit 1
+      fi
+      BASE_REF="$2"
+      shift 2
+      ;;
     --copy-paths)
       if [[ -z "${2:-}" ]]; then
         _err "--copy-paths requires a space-separated list of paths"
@@ -508,6 +524,19 @@ fi
 # initial-only operation that moves that state into a fresh tree.
 if [[ "$WORKTREE" == "true" ]] && [[ "$RESUME" == "true" ]]; then
   _err "--worktree cannot be combined with --resume" "Resume runs from the existing worktree directly."
+  exit 1
+fi
+
+# --base-ref is REQUIRED with --worktree — no default, never the invoking
+# cwd's ambient HEAD. This is a hard requirement (not resolved/defaulted)
+# precisely because ambient-branch-state was the root cause of a real bug:
+# sibling worktrees silently forking from whatever branch the primary
+# checkout happened to be on at spawn time, instead of the intended parent.
+if [[ "$WORKTREE" == "true" ]] && [[ -z "$BASE_REF" ]]; then
+  _err "--base-ref is required with --worktree" \
+    "Example: --worktree --base-ref main" \
+    "No default is used — this never falls back to the invoking cwd's ambient HEAD." \
+    "Pass the ref the new sibling worktree's branch should fork from (branch, tag, or SHA)."
   exit 1
 fi
 
@@ -913,7 +942,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   # a separate arg to setup-worktree.sh.
   # shellcheck disable=SC2086
   WORKTREE_PATH_ABS=$("${PLUGIN_ROOT}/scripts/setup-worktree.sh" \
-    "$LOOP_ID" "$WORKTREE_PATH_REL" "$BRANCH_NAME" \
+    "$LOOP_ID" "$WORKTREE_PATH_REL" "$BRANCH_NAME" "$BASE_REF" \
     "$CHECKLIST_DIR" $COPY_PATHS)
 
   if [[ -z "$WORKTREE_PATH_ABS" ]]; then
