@@ -24,6 +24,26 @@ see `acquire_merge_lock`/`release_merge_lock`. This is advisory only: a sibling
 session that ignores the lock can still merge (each worktree session is independent
 and cooperative_launch.py cannot block its Exit Gate), so document the ordering
 constraint in the sibling's own checklist/session guidance too.
+
+Base-branch tracking (fix): `build_launch_argv` used to spawn each sibling
+`--worktree` instance without ever specifying which branch it should fork from, so
+the sibling silently inherited whatever the primary checkout's ambient HEAD happened
+to be at spawn time. For the cooperative use case -- siblings implementing
+sub-checklists of ONE parent feature -- every sibling must branch from that parent
+feature's own branch, never from primary's incidental current branch (ambient-HEAD
+state is exactly the bug class this exists to prevent; walking primary's checked-out
+branch back and forth to work around it was the real confusion this fix is for).
+`--parent-branch <name>` is therefore a REQUIRED CLI argument with no ambient-state
+default or inference -- callers must say explicitly which feature branch the
+cooperative run belongs to. Internally its value is passed straight through as
+`--base-ref <parent-branch>` to each `setup-ralph-loop-fork.sh --worktree` invocation
+(that script's own `--base-ref` in turn becomes the `<ref>` in
+`git worktree add <path> -b <branch> <ref>`). `cooperative-state.json` gained a
+`base_branch` field, written once by `main_with_args` when state is first created
+(set to `--parent-branch`'s value); a subsequent run against the SAME state file with
+a DIFFERENT `--parent-branch` value fails loudly instead of silently overwriting it,
+since that mismatch almost always means the script was invoked with the wrong branch
+for an already-in-flight cooperative run.
 """
 
 import argparse
@@ -127,10 +147,15 @@ def build_launch_argv(
     sub_info: dict,
     checklist_dir: Path,
     coop_id: str,
+    parent_branch: str,
     script_path: Path = None,
 ) -> list:
     """Build the argv for launching one ready sub-checklist as a sibling worktree
-    loop via `setup-ralph-loop-fork.sh --worktree` -- never raw `git worktree add`."""
+    loop via `setup-ralph-loop-fork.sh --worktree` -- never raw `git worktree add`.
+
+    `parent_branch` is always forwarded as `--base-ref <parent_branch>` so the sibling
+    forks from the parent feature's own branch instead of inheriting primary's ambient
+    HEAD at spawn time -- see the base-branch-tracking fix in the module docstring."""
     script = str(script_path or DEFAULT_RALPH_SCRIPT)
     checklist_path = str(checklist_dir / sub_info["checklist"])
     loop_name = f"{coop_id}-sub{sub_id:02d}"
@@ -140,6 +165,7 @@ def build_launch_argv(
         "--command", "/implement",
         "--name", loop_name,
         "--worktree",
+        "--base-ref", parent_branch,
     ]
 
 
@@ -155,6 +181,15 @@ def main_with_args(argv, run=subprocess.run) -> int:
     )
     parser.add_argument("--master-checklist", required=True, help="Path to MASTER-CHECKLIST.md")
     parser.add_argument("--coop-id", required=True, help="Cooperative-run identifier (used to namespace state + loop names)")
+    parser.add_argument(
+        "--parent-branch",
+        required=True,
+        help=(
+            "Name of the parent feature branch every sibling worktree must fork from "
+            "(forwarded as --base-ref to setup-ralph-loop-fork.sh --worktree). Never "
+            "inferred from the invoking cwd's ambient branch -- must be stated explicitly."
+        ),
+    )
     parser.add_argument("--merged", default="", help="Comma-separated sub IDs already merged (e.g. '1,2')")
     parser.add_argument("--state-dir", default=None, help="Override state dir (default: <project-root>/.claude/ralph-fork/<coop-id>)")
     parser.add_argument("--dry-run", action="store_true", help="Print launch argv without spawning")
@@ -185,9 +220,22 @@ def main_with_args(argv, run=subprocess.run) -> int:
     state.setdefault("merged", sorted(merged))
     state.setdefault("launched", {})
 
+    existing_base_branch = state.get("base_branch")
+    if existing_base_branch is not None and existing_base_branch != args.parent_branch:
+        print(
+            f"❌ cooperative-state base_branch mismatch: {state_path} was created with "
+            f"base_branch={existing_base_branch!r}, but this run passed "
+            f"--parent-branch={args.parent_branch!r}. Refusing to silently overwrite -- "
+            "this almost always means the wrong branch was passed for an already "
+            "in-flight cooperative run.",
+            file=sys.stderr,
+        )
+        return 2
+    state["base_branch"] = args.parent_branch
+
     checklist_dir = master_path.parent
     for sub_id in ready:
-        argv_for_sub = build_launch_argv(sub_id, subs[sub_id], checklist_dir, args.coop_id)
+        argv_for_sub = build_launch_argv(sub_id, subs[sub_id], checklist_dir, args.coop_id, args.parent_branch)
         if args.dry_run:
             print(f"[dry-run] sub-{sub_id:02d}: {' '.join(argv_for_sub)}")
             continue
