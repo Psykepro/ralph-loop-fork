@@ -160,6 +160,39 @@ def test_build_launch_argv_forwards_stop_hook_reminders_for_merge_target():
     assert "gh pr create --base feature/parent-x" in reminder
 
 
+def test_build_launch_argv_always_sets_completion_promise_and_total_budget():
+    """Without --completion-promise, hooks/stop-hook-fork.sh has no mechanism to
+    recognize checklist-complete and forks all the way to --total-budget's default
+    of 100 -- this must never be omitted for a spawned sibling."""
+    subs = cl.parse_execution_order(SINGLE_DEP_MASTER)
+    argv = cl.build_launch_argv(
+        2, subs[2], Path("/tmp/plan-dir"), "coop-x", "feature/parent-x",
+        script_path=Path("/fake/setup-ralph-loop-fork.sh"),
+    )
+    assert "--completion-promise" in argv
+    idx = argv.index("--completion-promise")
+    assert argv[idx + 1] == "COOP_X_SUB02_COMPLETE"
+    assert "--total-budget" in argv
+    idx = argv.index("--total-budget")
+    assert argv[idx + 1] == "20"
+
+
+def test_build_launch_argv_respects_custom_total_budget():
+    subs = cl.parse_execution_order(SINGLE_DEP_MASTER)
+    argv = cl.build_launch_argv(
+        2, subs[2], Path("/tmp/plan-dir"), "coop-x", "feature/parent-x",
+        script_path=Path("/fake/setup-ralph-loop-fork.sh"), total_budget=5,
+    )
+    idx = argv.index("--total-budget")
+    assert argv[idx + 1] == "5"
+
+
+def test_completion_promise_for_is_deterministic_and_sub_specific():
+    assert cl.completion_promise_for("coop-x", 1) == "COOP_X_SUB01_COMPLETE"
+    assert cl.completion_promise_for("coop-x", 2) == "COOP_X_SUB02_COMPLETE"
+    assert cl.completion_promise_for("coop-x", 1) != cl.completion_promise_for("coop-x", 2)
+
+
 def test_merge_target_reminder_names_all_three_exit_gate_steps():
     reminder = cl.merge_target_reminder("feature/parent-x")
     assert "git merge origin/feature/parent-x" in reminder

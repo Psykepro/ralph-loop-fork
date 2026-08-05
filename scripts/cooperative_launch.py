@@ -171,6 +171,13 @@ def merge_target_reminder(parent_branch: str) -> str:
     )
 
 
+def completion_promise_for(coop_id: str, sub_id: int) -> str:
+    """Deterministic per-sub completion-promise token. See `build_launch_argv`'s
+    docstring for why this must never be omitted."""
+    safe_coop_id = re.sub(r'[^A-Za-z0-9]+', '_', coop_id).strip('_').upper()
+    return f"{safe_coop_id}_SUB{sub_id:02d}_COMPLETE"
+
+
 def build_launch_argv(
     sub_id: int,
     sub_info: dict,
@@ -178,6 +185,7 @@ def build_launch_argv(
     coop_id: str,
     parent_branch: str,
     script_path: Path = None,
+    total_budget: int = 20,
 ) -> list:
     """Build the argv for launching one ready sub-checklist as a sibling worktree
     loop via `setup-ralph-loop-fork.sh --worktree` -- never raw `git worktree add`.
@@ -188,7 +196,16 @@ def build_launch_argv(
     in the module docstring), and as `--stop-hook-reminders` text (see
     `merge_target_reminder`) so the sibling's own Exit Gate reconciles against and
     merges its PR INTO that same parent branch, not the repo's default branch --
-    `--base-ref` alone only fixes the fork point, not the merge target."""
+    `--base-ref` alone only fixes the fork point, not the merge target.
+
+    `--completion-promise` is ALWAYS set (never omitted): `hooks/stop-hook-fork.sh`'s
+    RUNNING-state branch only ever transitions toward stopping when a completion
+    promise is configured AND detected in the session's output -- with no promise
+    configured, the loop has no mechanism to recognize "checklist is 100% done" on
+    its own and will keep re-feeding/forking every sibling all the way to
+    `--total-budget`'s default of 100 iterations, silently, for a checklist that may
+    only need one. `total_budget` defaults to 20 (bounded but generous for a single
+    non-trivial sub-checklist) and is forwarded as `--total-budget`."""
     script = str(script_path or DEFAULT_RALPH_SCRIPT)
     checklist_path = str(checklist_dir / sub_info["checklist"])
     loop_name = f"{coop_id}-sub{sub_id:02d}"
@@ -199,6 +216,8 @@ def build_launch_argv(
         "--name", loop_name,
         "--worktree",
         "--base-ref", parent_branch,
+        "--completion-promise", completion_promise_for(coop_id, sub_id),
+        "--total-budget", str(total_budget),
         "--stop-hook-reminders", merge_target_reminder(parent_branch),
     ]
 
@@ -226,6 +245,7 @@ def main_with_args(argv, run=subprocess.run) -> int:
     )
     parser.add_argument("--merged", default="", help="Comma-separated sub IDs already merged (e.g. '1,2')")
     parser.add_argument("--state-dir", default=None, help="Override state dir (default: <project-root>/.claude/ralph-fork/<coop-id>)")
+    parser.add_argument("--sibling-total-budget", type=int, default=20, help="--total-budget forwarded to each sibling's ralph-loop-fork invocation (default: 20)")
     parser.add_argument("--dry-run", action="store_true", help="Print launch argv without spawning")
     args = parser.parse_args(argv)
 
@@ -269,7 +289,10 @@ def main_with_args(argv, run=subprocess.run) -> int:
 
     checklist_dir = master_path.parent
     for sub_id in ready:
-        argv_for_sub = build_launch_argv(sub_id, subs[sub_id], checklist_dir, args.coop_id, args.parent_branch)
+        argv_for_sub = build_launch_argv(
+            sub_id, subs[sub_id], checklist_dir, args.coop_id, args.parent_branch,
+            total_budget=args.sibling_total_budget,
+        )
         if args.dry_run:
             print(f"[dry-run] sub-{sub_id:02d}: {' '.join(argv_for_sub)}")
             continue
