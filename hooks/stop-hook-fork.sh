@@ -571,6 +571,97 @@ CLEANUP_EOF
 }
 
 # ============================================================================
+# TRIGGER 0 — worktree-gc completion-promise teardown
+# (chore-worktree-gc-2026-08-05, AEOS "ai-agentic-coding-ready-now" repo)
+# ============================================================================
+# The moment a run reaches a GENUINE terminal completion (never
+# budget/doom/revision-exhausted — those stay BLOCKER.md territory, and never
+# the orphaned_executing_on_completion path — its on-completion outcome is
+# unknown), spawn a DETACHED helper that reclaims the worktree if it's safe.
+#
+# Step A hazard (do not "fix" by reusing $PROJECT_ROOT here): for a
+# --worktree run, find_project_root() above walks up from the session's own
+# $PWD, which for a worktree run *is the worktree* — so $PROJECT_ROOT
+# resolves to the WORKTREE's own path, not the main checkout, throughout the
+# rest of this hook (by design — CHECKLIST_PATH/archival intentionally stay
+# worktree-scoped). worktree-gc.py must run rooted in the MAIN checkout
+# instead, or a detached process spawned inside the worktree could remove
+# its own cwd out from under itself — exactly what this feature exists to
+# prevent. The main checkout root is derived from state.json's own
+# `worktree_path` (always `<main>/.worktrees/<name>` in this repo's
+# convention), never from $PROJECT_ROOT.
+dispatch_worktree_gc() {
+  local state_file="$1"
+
+  if [[ ! -f "$state_file" ]]; then
+    debug_log "TRIGGER-0: state file missing, skipping dispatch"
+    return 0
+  fi
+
+  # Double-fire guard (ralph-aeos-contract.double-fire.md — this hook fires
+  # on both PreToolUse and PostToolUse). A sentinel next to the state file,
+  # checked before run_cleanup_detached archives the loop dir a few seconds
+  # later, makes the second fire a silent no-op instead of a second helper.
+  local marker="${state_file}.worktree-gc-dispatched"
+  if [[ -f "$marker" ]]; then
+    debug_log "TRIGGER-0: already dispatched for this loop (marker present), skipping"
+    return 0
+  fi
+  touch "$marker" 2>/dev/null
+
+  local worktree_path
+  worktree_path=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null)
+  if [[ -z "$worktree_path" ]] || [[ "$worktree_path" == "null" ]]; then
+    debug_log "TRIGGER-0: worktree_path is null — non-worktree run, no-op"
+    return 0
+  fi
+
+  local preserve_final
+  preserve_final=$(jq -r '.preserve_final_session // false' "$state_file" 2>/dev/null)
+  if [[ "$preserve_final" == "true" ]]; then
+    debug_log "TRIGGER-0: preserve_final_session=true — deferred by construction, not spawning the helper (run_cleanup_detached already preserves the final session's tmux pane; safety-net triggers reclaim later once it's actually gone)"
+    return 0
+  fi
+
+  # Derive the MAIN checkout root from worktree_path itself — see the hazard
+  # note above. worktree_path is always "<main>/.worktrees/<name>" in this
+  # repo's convention; strip the shortest "/.worktrees/*" suffix.
+  local main_root="${worktree_path%/.worktrees/*}"
+  if [[ -z "$main_root" ]] || [[ "$main_root" == "$worktree_path" ]]; then
+    debug_log "TRIGGER-0: could not derive main checkout root from worktree_path='$worktree_path' — refusing to guess, skipping dispatch (safety-net triggers will pick this up)"
+    return 0
+  fi
+
+  local gc_script="$main_root/.claude/scripts/worktree-gc.py"
+  if [[ ! -f "$gc_script" ]]; then
+    debug_log "TRIGGER-0: worktree-gc.py not found at $gc_script — this project predates the feature, no-op"
+    return 0
+  fi
+
+  # The currently-firing session is the most recently spawned one — same
+  # derivation run_cleanup_detached uses for its own LAST_SESSION (the one
+  # to preserve when preserve_final_session=true; here we already returned
+  # early in that case, so this is simply "the session whose Stop hook is
+  # running right now").
+  local session_name
+  session_name=$(jq -r '.spawned_sessions[-1]?.name // empty' "$state_file" 2>/dev/null)
+  if [[ -z "$session_name" ]]; then
+    debug_log "TRIGGER-0: could not resolve current session name from spawned_sessions — skipping dispatch (safety-net triggers will pick this up)"
+    return 0
+  fi
+
+  local pane_pid
+  pane_pid=$(tmux list-panes -t "=$session_name" -F '#{pane_pid}' 2>/dev/null | head -1)
+  if [[ -z "$pane_pid" ]]; then
+    debug_log "TRIGGER-0: could not resolve pane pid for session '$session_name' — skipping dispatch (safety-net triggers will pick this up)"
+    return 0
+  fi
+
+  debug_log "TRIGGER-0: spawning detached worktree-gc helper for $worktree_path (main_root=$main_root, pid=$pane_pid, session=$session_name)"
+  ( nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
+}
+
+# ============================================================================
 # ERROR DETECTION FUNCTIONS
 # ============================================================================
 # FIX (2026-02-03): Only check LAST 30 lines of transcript, not entire session.
@@ -1136,6 +1227,8 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
       SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — checklist moved to done/")
       jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
 
+      dispatch_worktree_gc "$STATE_FILE"
+
       debug_log "Spawning detached cleanup process..."
       run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
       debug_log "Detached cleanup spawned, exiting hook"
@@ -1176,6 +1269,8 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     emit_signal "ralph-completed" "$(jq -nc --arg reason "on_completion_executed" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
     SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
     jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
+    dispatch_worktree_gc "$STATE_FILE"
 
     debug_log "Spawning detached cleanup process..."
     run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
@@ -1782,6 +1877,8 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
         SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
         jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
 
+        dispatch_worktree_gc "$STATE_FILE"
+
         debug_log "Spawning detached cleanup (no on-completion)"
         run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
 
@@ -1809,6 +1906,8 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
         emit_signal "ralph-completed" "$(jq -nc --arg reason "completed_no_checklist" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
         SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete — $SESSION_NUMBER session(s)")
         jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
+        dispatch_worktree_gc "$STATE_FILE"
 
         debug_log "Spawning detached cleanup (no checklist, no on-completion)"
         run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
