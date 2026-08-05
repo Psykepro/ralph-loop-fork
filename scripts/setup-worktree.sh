@@ -8,12 +8,17 @@
 # extra paths.
 #
 # Usage:
-#   setup-worktree.sh LOOP_ID WORKTREE_PATH BRANCH CHECKLIST_DIR [COPY_PATHS...]
+#   setup-worktree.sh LOOP_ID WORKTREE_PATH BRANCH BASE_REF CHECKLIST_DIR [COPY_PATHS...]
 #
 # Arguments:
 #   LOOP_ID         loop identifier (used to skip its stale state in the dest)
 #   WORKTREE_PATH   path to create the worktree at (relative or absolute)
 #   BRANCH          branch name to create with `git worktree add -b`
+#   BASE_REF        REQUIRED ref the new branch forks from (commit-ish: branch,
+#                   tag, SHA). Passed straight to `git worktree add PATH -b
+#                   BRANCH BASE_REF` — no default, no fallback to the invoking
+#                   cwd's HEAD. Callers MUST resolve this explicitly; ambient
+#                   cwd state must never decide a sibling worktree's parent.
 #   CHECKLIST_DIR   directory containing the checklist file (copied wholesale)
 #   COPY_PATHS...   extra files/dirs to copy verbatim into matching paths
 #
@@ -25,17 +30,26 @@
 
 set -euo pipefail
 
-if [[ $# -lt 4 ]]; then
-  echo "Usage: setup-worktree.sh LOOP_ID WORKTREE_PATH BRANCH CHECKLIST_DIR [COPY_PATHS...]" >&2
+if [[ $# -lt 5 ]]; then
+  echo "Usage: setup-worktree.sh LOOP_ID WORKTREE_PATH BRANCH BASE_REF CHECKLIST_DIR [COPY_PATHS...]" >&2
   exit 1
 fi
 
 LOOP_ID="$1"
 WORKTREE_PATH="$2"
 BRANCH="$3"
-CHECKLIST_DIR="$4"
-shift 4
+BASE_REF="$4"
+CHECKLIST_DIR="$5"
+shift 5
 # Remaining args are extra copy paths (may be zero).
+
+# Fail loudly rather than silently defaulting — this script is the plugin's
+# last line of defense if a caller somehow skips the CLI-layer requirement.
+if [[ -z "$BASE_REF" ]]; then
+  echo "Error: BASE_REF is required and was empty." >&2
+  echo "  setup-worktree.sh never defaults to the invoking cwd's HEAD — pass an explicit ref." >&2
+  exit 1
+fi
 
 if ! command -v git >/dev/null 2>&1; then
   echo "Error: git is required but was not found." >&2
@@ -47,12 +61,18 @@ if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+  echo "Error: BASE_REF does not resolve to a commit: $BASE_REF" >&2
+  exit 1
+fi
+
 # Create parent dir for the worktree (e.g. .worktrees/).
 mkdir -p "$(dirname "$WORKTREE_PATH")"
 
-# Create the worktree on a new branch. Surfaces git's own error messages
-# (branch exists, path exists, etc.) without swallowing them.
-git worktree add "$WORKTREE_PATH" -b "$BRANCH" >&2
+# Create the worktree on a new branch, forked from BASE_REF (never the
+# invoking cwd's ambient HEAD). Surfaces git's own error messages (branch
+# exists, path exists, etc.) without swallowing them.
+git worktree add "$WORKTREE_PATH" -b "$BRANCH" "$BASE_REF" >&2
 
 # Resolve absolute path now that the dir exists.
 WORKTREE_ABS="$(cd "$WORKTREE_PATH" && pwd)"

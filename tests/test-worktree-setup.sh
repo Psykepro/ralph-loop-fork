@@ -66,9 +66,11 @@ git add CLAUDE.md .claude _project/progress _project/progress/in-progress/checkl
 git add -f _project/progress/in-progress/checklist.md 2>/dev/null
 git commit -qm "fixture"
 
+MAIN_HEAD=$(git -C "$REPO_DIR" rev-parse HEAD)
+
 echo -e "${YELLOW}Test 1: setup-worktree.sh creates worktree with correct payload${NC}"
 
-ABS=$(bash "$SETUP_WT" "my-loop" ".worktrees/my-loop" "ralph/my-loop" \
+ABS=$(bash "$SETUP_WT" "my-loop" ".worktrees/my-loop" "ralph/my-loop" "$MAIN_HEAD" \
         "_project/progress/in-progress" extras 2>/dev/null)
 RC=$?
 
@@ -129,7 +131,7 @@ echo ""
 echo -e "${YELLOW}Test 2: CHECKLIST_DIR=\".\" does not drag .git into worktree${NC}"
 
 # A second worktree, this time with a root-level checklist (CHECKLIST_DIR=".").
-ABS2=$(bash "$SETUP_WT" "root-loop" ".worktrees/root-loop" "ralph/root-loop" "." 2>/dev/null)
+ABS2=$(bash "$SETUP_WT" "root-loop" ".worktrees/root-loop" "ralph/root-loop" "$MAIN_HEAD" "." 2>/dev/null)
 if [[ -n "$ABS2" ]] && [[ -d "$ABS2" ]]; then
   pass "setup-worktree handled CHECKLIST_DIR=\".\" without aborting"
 else
@@ -199,6 +201,84 @@ if [[ -d "$ABS" ]]; then
   pass "Worktree directory left in place for inspection"
 else
   fail "Worktree directory was auto-removed (regression!)" ""
+fi
+
+echo ""
+echo -e "${YELLOW}Test 4: --base-ref is required and honored, not the invoking cwd's ambient HEAD${NC}"
+
+# Move main forward with a second commit, then create a separate branch that
+# stays pinned at the ORIGINAL fixture commit. The invoking cwd (main) is now
+# ahead of that branch — proving the new worktree branch must fork from
+# BASE_REF, not whatever HEAD the cwd happens to have.
+cd "$REPO_DIR"
+echo "second" >> CLAUDE.md
+git add CLAUDE.md
+git commit -qm "second commit on main (advances ambient cwd HEAD)"
+CWD_HEAD=$(git rev-parse HEAD)
+git branch parent-branch "$MAIN_HEAD"
+
+if [[ "$CWD_HEAD" == "$MAIN_HEAD" ]]; then
+  fail "test setup broken: cwd HEAD did not advance past MAIN_HEAD" ""
+else
+  pass "test setup: cwd HEAD ($CWD_HEAD) now differs from parent-branch HEAD ($MAIN_HEAD)"
+fi
+
+# 4a: missing BASE_REF positional arg entirely -> usage error, non-zero exit.
+OUT_MISSING=$(bash "$SETUP_WT" "no-base-ref-loop" ".worktrees/no-base-ref-loop" "ralph/no-base-ref-loop" \
+  "_project/progress/in-progress" 2>&1)
+RC_MISSING=$?
+if [[ $RC_MISSING -ne 0 ]] && grep -qi "Usage:" <<< "$OUT_MISSING"; then
+  pass "Missing BASE_REF arg fails loudly with usage error"
+else
+  fail "Missing BASE_REF arg did not fail as expected" "rc=$RC_MISSING out=$OUT_MISSING"
+fi
+[[ ! -e "$REPO_DIR/.worktrees/no-base-ref-loop" ]] && pass "No worktree created on missing-BASE_REF failure" \
+  || fail "Worktree created despite missing BASE_REF" ""
+
+# 4b: explicit empty-string BASE_REF -> loud error, non-zero exit, nothing created.
+OUT_EMPTY=$(bash "$SETUP_WT" "empty-base-ref-loop" ".worktrees/empty-base-ref-loop" "ralph/empty-base-ref-loop" "" \
+  "_project/progress/in-progress" 2>&1)
+RC_EMPTY=$?
+if [[ $RC_EMPTY -ne 0 ]] && grep -qi "BASE_REF is required" <<< "$OUT_EMPTY"; then
+  pass "Empty BASE_REF fails loudly with clear error"
+else
+  fail "Empty BASE_REF did not fail as expected" "rc=$RC_EMPTY out=$OUT_EMPTY"
+fi
+[[ ! -e "$REPO_DIR/.worktrees/empty-base-ref-loop" ]] && pass "No worktree created on empty-BASE_REF failure" \
+  || fail "Worktree created despite empty BASE_REF" ""
+
+# 4c: unresolvable BASE_REF -> loud error, non-zero exit.
+OUT_BAD=$(bash "$SETUP_WT" "bad-base-ref-loop" ".worktrees/bad-base-ref-loop" "ralph/bad-base-ref-loop" "does-not-exist-ref" \
+  "_project/progress/in-progress" 2>&1)
+RC_BAD=$?
+if [[ $RC_BAD -ne 0 ]] && grep -qi "does not resolve to a commit" <<< "$OUT_BAD"; then
+  pass "Unresolvable BASE_REF fails loudly with clear error"
+else
+  fail "Unresolvable BASE_REF did not fail as expected" "rc=$RC_BAD out=$OUT_BAD"
+fi
+
+# 4d: valid --base-ref succeeds, and the resulting branch's parent commit is
+# BASE_REF's HEAD (parent-branch / MAIN_HEAD), NOT the invoking cwd's HEAD
+# (main's CWD_HEAD, which is one commit ahead).
+ABS4=$(bash "$SETUP_WT" "base-ref-loop" ".worktrees/base-ref-loop" "ralph/base-ref-loop" "parent-branch" \
+  "_project/progress/in-progress" 2>/dev/null)
+RC4=$?
+if [[ $RC4 -eq 0 ]] && [[ -n "$ABS4" ]] && [[ -d "$ABS4" ]]; then
+  pass "--base-ref succeeds and creates the worktree"
+else
+  fail "--base-ref run failed" "rc=$RC4 out=$ABS4"
+fi
+
+NEW_BRANCH_HEAD=$(git -C "$ABS4" rev-parse HEAD 2>/dev/null || echo "")
+if [[ "$NEW_BRANCH_HEAD" == "$MAIN_HEAD" ]]; then
+  pass "New branch forks from BASE_REF's HEAD ($MAIN_HEAD), not the invoking cwd's HEAD"
+else
+  fail "New branch did NOT fork from BASE_REF's HEAD" "expected=$MAIN_HEAD got=$NEW_BRANCH_HEAD (cwd HEAD was $CWD_HEAD)"
+fi
+if [[ "$NEW_BRANCH_HEAD" != "$CWD_HEAD" ]]; then
+  pass "New branch parent is NOT the invoking cwd's ambient HEAD"
+else
+  fail "New branch incorrectly forked from the invoking cwd's ambient HEAD (the bug this flag fixes)" ""
 fi
 
 echo ""

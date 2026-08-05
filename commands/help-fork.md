@@ -58,6 +58,7 @@ Start a fork-based Ralph loop.
 - `--worktree` - Run the loop inside an isolated git worktree (default: `false`; see Worktree Mode below)
 - `--worktree-base <dir>` - Parent dir for worktrees (default: `.worktrees`)
 - `--branch <name>` - Branch name for the worktree (default: `ralph/<loop-id>`)
+- `--base-ref <ref>` - REQUIRED with `--worktree` — the ref the new sibling worktree branches from; no ambient-cwd default
 - `--copy-paths "<a b c>"` - Extra files/dirs to copy into the worktree (space-separated inside a single quoted arg)
 
 **Checklist Validation:**
@@ -145,6 +146,7 @@ Pass `--worktree` to run the entire loop inside a git worktree. The loop's commi
   --name "feat-x" \
   --completion-promise "ALL_DONE" \
   --worktree \
+  --base-ref main \
   --copy-paths "_project/docs docs/specs"
 ```
 
@@ -163,11 +165,13 @@ Pass `--worktree` to run the entire loop inside a git worktree. The loop's commi
 | `--no-worktree` | (default) | Explicit opt-out (documents intent) |
 | `--worktree-base <dir>` | `.worktrees` | Parent directory for the worktree |
 | `--branch <name>` | `ralph/<loop-id>` | Branch name to create |
+| `--base-ref <ref>` | **required with `--worktree`** | The ref new sibling worktree branches fork from; no ambient-cwd default |
 | `--copy-paths "<a b c>"` | none | Extra files/dirs to copy in (space-separated inside one quoted arg) |
 
 **Restrictions:**
 
 - `--worktree` cannot be combined with `--resume` (resume already runs from the existing worktree).
+- `--base-ref <ref>` is **required** with `--worktree` — no default, never the invoking cwd's ambient HEAD. Omitting it fails loudly before anything is created.
 
 **Post-completion merge workflow:**
 

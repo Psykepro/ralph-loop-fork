@@ -181,7 +181,7 @@ OUT2=$(mktemp); ERR2=$(mktemp)
 cd "$R2"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "aeos-wt" --total-budget 1 --max-per-session 1 --worktree \
+  --name "aeos-wt" --total-budget 1 --max-per-session 1 --worktree --base-ref HEAD \
   >"$OUT2" 2>"$ERR2"
 RC2=$?
 cd - >/dev/null
