@@ -60,7 +60,7 @@ SPAWN_LOG="$TEST_DIR/spawn.log"
 
 cat > "$STUB_BIN/python3" <<'EOF'
 #!/bin/bash
-echo "python3 $* CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-<unset>}" >> "$SPAWN_LOG_FILE"
+echo "python3 $* CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-<unset>} PWD=$PWD" >> "$SPAWN_LOG_FILE"
 exit 0
 EOF
 chmod +x "$STUB_BIN/python3"
@@ -247,6 +247,44 @@ test_dispatch_forces_main_root_project_dir() {
   assert_equals "1" "$(spawn_count)" "exactly one worktree-gc.py dispatch"
   assert_contains "CLAUDE_PROJECT_DIR=$TEST_DIR" "$(cat "$SPAWN_LOG" 2>/dev/null)" \
     "worktree-gc.py child sees CLAUDE_PROJECT_DIR forced to main_root, not the inherited worktree path"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test 1c (round-9 zero-issue-loop Reliability HIGH): the Stop hook's own
+# $PWD can ALSO be the worktree (find_project_root() walks up from $PWD, and
+# for a --worktree run that IS the worktree — same hazard 1b covers for the
+# env-var channel). Unlike CLAUDE_PROJECT_DIR, the fix must explicitly `cd`
+# the spawned child to main_root — nothing else changes cwd for it.
+# -----------------------------------------------------------------------------
+test_dispatch_forces_main_root_cwd() {
+  echo -e "${YELLOW}Test 1c: dispatch forces cwd=main_root even when the hook's own \$PWD is the worktree${NC}"
+  rm -f "$SPAWN_LOG"
+  local loop_id="test-wtgc-cwd-force"
+  local transcript_file
+  transcript_file=$(setup_test_env "$loop_id" "cwd-force")
+  local worktree_dir="$TEST_DIR/.worktrees/$loop_id"
+  mkdir -p "$worktree_dir"
+  create_state_file "$loop_id" "$TEST_DIR/nonexistent-checklist.md" \
+    "$worktree_dir" "false" "ralph-$loop_id-1" "true" "false" "false"
+  create_local_file "$loop_id"
+  create_transcript "$transcript_file" "$loop_id" "moved"
+
+  local input_json
+  input_json=$(jq -n --arg t "$transcript_file" --argjson sha true \
+    '{"stop_hook_active": $sha, "transcript_path": $t}')
+  ( cd "$worktree_dir" && echo "$input_json" | bash "$HOOK_SCRIPT" > /dev/null 2>&1 ) || true
+  sleep 1
+
+  assert_equals "1" "$(spawn_count)" "exactly one worktree-gc.py dispatch"
+  # Exact-value check, NOT assert_contains: $worktree_dir has $TEST_DIR as a
+  # string PREFIX, so a substring match would false-pass even if the child's
+  # cwd were the worktree itself — extract the logged PWD and compare exactly.
+  local logged_pwd
+  logged_pwd=$(grep -F "worktree-gc.py" "$SPAWN_LOG" 2>/dev/null | grep -oE 'PWD=.*$' | sed 's/^PWD=//')
+  assert_equals "$TEST_DIR" "$logged_pwd" \
+    "worktree-gc.py child's cwd is forced to main_root, not the worktree it was invoked from"
 
   echo ""
 }
@@ -481,6 +519,7 @@ echo ""
 
 test_checklist_moved_dispatches
 test_dispatch_forces_main_root_project_dir
+test_dispatch_forces_main_root_cwd
 test_null_worktree_path_no_dispatch
 test_preserve_final_session_no_dispatch
 test_on_completion_executed_dispatches

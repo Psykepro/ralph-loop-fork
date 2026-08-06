@@ -664,7 +664,17 @@ dispatch_worktree_gc() {
   # nohup'd child would otherwise inherit that value — worktree-gc.py's
   # _project_root() prefers CLAUDE_PROJECT_DIR when set, so an inherited
   # worktree path makes it operate against the wrong repo root entirely.
-  ( CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
+  #
+  # `cd "$main_root"` is equally required, not just CLAUDE_PROJECT_DIR: this
+  # hook's own $PWD is at/under the worktree for a --worktree run (same
+  # hazard as above), and neither the subshell, nohup, nor disown changes
+  # cwd on their own — the spawned child would otherwise inherit that cwd
+  # and then self-detect as a "live session process" via
+  # worktree-gc.py's lsof-based live_session_process() probe, which matches
+  # on cwd alone with no pid awareness (round-9 zero-issue-loop Reliability
+  # HIGH): the row classifies DEFERRED forever, the PRIMARY trigger never
+  # reclaims, and the tmux session leaks permanently with zero signal.
+  ( cd "$main_root" && CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
 }
 
 # ============================================================================
