@@ -658,7 +658,13 @@ dispatch_worktree_gc() {
   fi
 
   debug_log "TRIGGER-0: spawning detached worktree-gc helper for $worktree_path (main_root=$main_root, pid=$pane_pid, session=$session_name)"
-  ( nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
+  # CLAUDE_PROJECT_DIR must be forced to main_root, not just inherited: this
+  # Stop hook can itself be running with CLAUDE_PROJECT_DIR set to the
+  # WORKTREE (see find_project_root()'s PWD-walk hazard above), and the
+  # nohup'd child would otherwise inherit that value — worktree-gc.py's
+  # _project_root() prefers CLAUDE_PROJECT_DIR when set, so an inherited
+  # worktree path makes it operate against the wrong repo root entirely.
+  ( CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
 }
 
 # ============================================================================
