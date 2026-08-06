@@ -912,7 +912,21 @@ extract_loop_from_transcript() {
 #
 # Fallback: scan .claude/ralph-fork/*/state.json from PWD for an active loop
 # whose worktree_path matches the current directory.
+#
+# GUARD: cwd-equals-worktree_path alone is not an identity check -- any
+# ordinary session that `cd`s into a loop's worktree (e.g. to inspect it)
+# satisfies that predicate honestly and gets misidentified as the loop's own
+# spawned session. fork-terminal.sh unconditionally exports
+# RALPH_LOOP_ACTIVE=1 into every session it actually spawns (see its
+# FORK_CMD); a manually-started or ad-hoc session never has this set, since
+# `cd` cannot set environment variables. Require it before trusting the cwd
+# match.
 extract_loop_from_worktree_state() {
+  if [[ "${RALPH_LOOP_ACTIVE:-}" != "1" ]]; then
+    debug_log "WORKTREE FALLBACK: RALPH_LOOP_ACTIVE not set - not a fork-spawned session, skipping"
+    return 1
+  fi
+
   local current_pwd
   current_pwd="$(cd "$(pwd)" 2>/dev/null && pwd)" || return 1
 
