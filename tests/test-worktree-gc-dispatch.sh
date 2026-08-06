@@ -60,7 +60,7 @@ SPAWN_LOG="$TEST_DIR/spawn.log"
 
 cat > "$STUB_BIN/python3" <<'EOF'
 #!/bin/bash
-echo "python3 $*" >> "$SPAWN_LOG_FILE"
+echo "python3 $* CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-<unset>}" >> "$SPAWN_LOG_FILE"
 exit 0
 EOF
 chmod +x "$STUB_BIN/python3"
@@ -219,6 +219,34 @@ test_checklist_moved_dispatches() {
   assert_contains "--only" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --only"
   assert_contains "--after-pid" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --after-pid"
   assert_contains "--kill-session tmux:ralph-$loop_id-1" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --kill-session tmux:<name>"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test 1b (round-5 zero-issue-loop Reliability CRITICAL): the Stop hook can
+# itself be running with CLAUDE_PROJECT_DIR set to the WORKTREE (the
+# find_project_root() PWD-walk hazard) — the nohup'd worktree-gc.py child
+# must NOT inherit that; it must be forced to main_root regardless of what
+# the parent hook's own environment holds.
+# -----------------------------------------------------------------------------
+test_dispatch_forces_main_root_project_dir() {
+  echo -e "${YELLOW}Test 1b: dispatch forces CLAUDE_PROJECT_DIR=main_root even if parent env has worktree path${NC}"
+  rm -f "$SPAWN_LOG"
+  local loop_id="test-wtgc-project-dir-force"
+  local transcript_file
+  transcript_file=$(setup_test_env "$loop_id" "project-dir-force")
+  create_state_file "$loop_id" "$TEST_DIR/nonexistent-checklist.md" \
+    "$TEST_DIR/.worktrees/$loop_id" "false" "ralph-$loop_id-1" "true" "false" "false"
+  create_local_file "$loop_id"
+  create_transcript "$transcript_file" "$loop_id" "moved"
+
+  CLAUDE_PROJECT_DIR="$TEST_DIR/.worktrees/$loop_id" run_hook "$transcript_file" true > /dev/null
+  sleep 1
+
+  assert_equals "1" "$(spawn_count)" "exactly one worktree-gc.py dispatch"
+  assert_contains "CLAUDE_PROJECT_DIR=$TEST_DIR" "$(cat "$SPAWN_LOG" 2>/dev/null)" \
+    "worktree-gc.py child sees CLAUDE_PROJECT_DIR forced to main_root, not the inherited worktree path"
 
   echo ""
 }
@@ -452,6 +480,7 @@ echo "=============================================="
 echo ""
 
 test_checklist_moved_dispatches
+test_dispatch_forces_main_root_project_dir
 test_null_worktree_path_no_dispatch
 test_preserve_final_session_no_dispatch
 test_on_completion_executed_dispatches
