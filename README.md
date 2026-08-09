@@ -268,7 +268,7 @@ in the loop's `state.json`.
 | `--max-per-session <n>` | 1 | Iterations before forking a new session |
 | `--completion-promise <text>` | null | Phrase Claude must output in `<promise>` tags to end the loop |
 | `--on-completion <cmd>` | null | Slash command run once after successful completion |
-| `--stop-hook-reminders <text\|path>` | null | Extra text injected into every stop-hook prompt; string or `.md` file |
+| `--stop-hook-reminders <text\|path>` | built-in default (always included) | Extra text APPENDED to every stop-hook prompt after the built-in default; string or `.md` file |
 | `--preserve-final-session` | false | Keep the final tmux session alive after completion |
 | `--no-cleanup` | false | Never kill any spawned sessions |
 | `--worktree` | false | Run the loop inside an isolated git worktree (see **Worktree Mode**) |
