@@ -1061,29 +1061,93 @@ hash_stdin() {
   md5 2>/dev/null || md5sum 2>/dev/null | awk '{print $1}'
 }
 
+# Strips mandatory "### Session N Notes" sections (header line through the
+# next "### " heading, exclusive) out of checklist content before hashing.
+# Without this, the per-session notes write alone changes component 1 every
+# round, masking a genuinely stuck loop (owner-blocked step, e.g. waiting
+# across sessions for an SSO login) as "progress".
+strip_session_notes() {
+  awk '
+    /^### Session [0-9]+ Notes/ { skip=1; next }
+    /^### / { skip=0 }
+    !skip { print }
+  ' "$1"
+}
+
+# Walks commits back from HEAD and returns the SHA of the latest one whose
+# diff touches a path other than checklist_path or one of the volatile
+# excludes (relative to project_root; same list as component 3's tree diff —
+# hook-appended jsonl, loop state under .claude/ralph-fork). A commit that
+# ONLY changes the checklist and/or those excluded paths is mandatory
+# per-session bookkeeping (the notes write, the hook's own state.json
+# update) — counting it as "progress" has the same masking effect as the raw
+# checklist hash in component 1, just via git HEAD instead. Falls back to
+# empty (contributes nothing) if no such commit exists in range, or the root
+# isn't a git repo.
+find_last_non_checklist_commit() {
+  local project_root="$1" checklist_path="$2" excludes="$3"
+  local rel="" sha files line ex is_excluded
+  if [[ -n "$checklist_path" ]]; then
+    rel="${checklist_path#"$project_root"/}"
+  fi
+  while IFS= read -r sha; do
+    [[ -n "$sha" ]] || continue
+    files=$(git -C "$project_root" diff-tree --no-commit-id --name-only -r --root "$sha" 2>/dev/null)
+    if [[ -z "$files" ]]; then
+      # Empty commit (e.g. `git commit --allow-empty`) touches no path at
+      # all, so it can't be a checklist-only/excluded-only bookkeeping
+      # commit — treat it as real progress, matching pre-fix behavior where
+      # any new commit (empty or not) moved the raw HEAD fingerprint.
+      printf '%s' "$sha"
+      return 0
+    fi
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      [[ "$line" == "$rel" ]] && continue
+      is_excluded=0
+      for ex in $excludes; do
+        if [[ "$line" == "$ex" ]] || [[ "$line" == "$ex"/* ]]; then
+          is_excluded=1
+          break
+        fi
+      done
+      if [[ $is_excluded -eq 0 ]]; then
+        printf '%s' "$sha"
+        return 0
+      fi
+    done <<< "$files"
+  done < <(git -C "$project_root" log --format=%H 2>/dev/null)
+  printf ''
+}
+
 compute_progress_fingerprint() {
   local checklist_path="$1" project_root="$2" aeos_config="$3" worktree_path="${4:-}"
   local parts="" comp=""
 
-  # 1) Checklist content
+  # 1) Checklist content, minus Session-N-Notes sections (see
+  #    strip_session_notes) — a notes-only edit must not register as progress.
   if [[ -n "$checklist_path" ]] && [[ -f "$checklist_path" ]]; then
-    comp=$(md5 -q "$checklist_path" 2>/dev/null || md5sum "$checklist_path" 2>/dev/null | awk '{print $1}') || comp=""
+    comp=$(strip_session_notes "$checklist_path" | hash_stdin) || comp=""
     parts="checklist:$comp"
   fi
 
-  # 2) Project HEAD — a commit is progress even when the checklist lags
-  comp=$(git -C "$project_root" rev-parse HEAD 2>/dev/null) || comp=""
-  parts="$parts|head:$comp"
-
-  # 3) Working-tree state, minus always-mutating paths (hook-appended jsonl,
-  #    loop state). Without these exclusions the tree hash changes EVERY
-  #    session and the breaker could never fire again — the false-positive fix
-  #    must not become a false-negative machine. Extra excludes come from
-  #    .progress_exclude[] in .aeos-config.json.
+  # Volatile excludes, minus always-mutating paths (hook-appended jsonl, loop
+  # state). Without these exclusions the tree/HEAD hashes change EVERY
+  # session and the breaker could never fire again — the false-positive fix
+  # must not become a false-negative machine. Extra excludes come from
+  # .progress_exclude[] in .aeos-config.json. Shared by components 2 and 3.
   local excludes="_project/metrics _project/signals .claude/ralph-fork BLOCKER.md"
   local extra
   extra=$(jq -r '.progress_exclude[]? // empty' "$aeos_config" 2>/dev/null | tr '\n' ' ') || extra=""
   excludes="$excludes $extra"
+
+  # 2) Project HEAD, skipping commits that touch only the checklist and/or
+  #    the excludes above (see find_last_non_checklist_commit) — the
+  #    mandatory per-session notes commit must not register as progress.
+  comp=$(find_last_non_checklist_commit "$project_root" "$checklist_path" "$excludes") || comp=""
+  parts="$parts|head:$comp"
+
+  # 3) Working-tree state, same excludes as component 2.
   local pathspec="" e
   for e in $excludes; do
     pathspec="$pathspec :(exclude)$e"

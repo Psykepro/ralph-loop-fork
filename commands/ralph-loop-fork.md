@@ -36,7 +36,7 @@ Unlike standard /ralph-loop which re-feeds the prompt in the SAME session until 
 | `--name <id>` | Loop identifier for parallel sessions | auto-generated |
 | `--completion-promise '<text>'` | Promise phrase to signal completion | none |
 | `--on-completion '<cmd>'` | Command to run after successful completion | none |
-| `--stop-hook-reminders '<text\|path>'` | Custom reminders added to stop hook prompts | none |
+| `--stop-hook-reminders '<text\|path>'` | Custom reminders added to stop hook prompts | built-in default (always included; custom text appends, does not replace) |
 | `--total-budget <n>` | Max iterations across ALL sessions | 100 |
 | `--max-per-session <n>` | Max iterations per session before forking | 1 |
 | `--preserve-final-session` | Don't cleanup final session at completion (preserve report) | false |
@@ -87,7 +87,7 @@ The on-completion command runs AFTER:
 
 ## Stop Hook Reminders
 
-Use `--stop-hook-reminders` to add custom reminders that appear in every stop hook prompt. This is useful for enforcing rules or reminding about constraints across all sessions.
+A built-in default reminder (about launching interactive/human-attended blocking commands like SSO logins via `run_in_background` + `Monitor`, never as a plain foreground call) is ALWAYS included, even if `--stop-hook-reminders` is not passed. Use `--stop-hook-reminders` to add custom reminders on top — custom text APPENDS after the built-in default, it does not replace it.
 
 ```bash
 # Pass reminders as a string

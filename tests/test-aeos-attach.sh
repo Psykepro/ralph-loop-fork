@@ -1307,6 +1307,109 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo -e "${YELLOW}Test 22: Session-N-Notes-only commits do NOT reset stuck_count (doom-loop fix)${NC}"
+# Origin: a genuinely owner-blocked step (e.g. multi-session SSO wait) never
+# tripped the breaker because the mandatory per-session "### Session N Notes"
+# checklist write + its commit both registered as "progress" in
+# compute_progress_fingerprint's component 1 (checklist hash) and component 2
+# (git HEAD). Simulate N sessions whose ONLY diff each round is a Session-N-
+# Notes append + commit; stuck_count must still climb and doom-loop must still
+# fire at doom_abort_threshold.
+
+T22=$(mktemp -d -t aeos-t22-XXXX); _CLEANUP_DIRS+=("$T22")
+# stuck_count=1, doom_threshold=2 — next no-progress fire reaches threshold
+make_stop_fixture "$T22" "doom-t22" 1 "" 0 5 2 false
+CHECKLIST_T22="$T22/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md"
+# Seed a pre-existing Session-Notes block BEFORE the baseline commit, so the
+# baseline already matches the "has a trailing notes section" shape. Without
+# this, the FIRST notes append is itself a one-time real content-shape change
+# (no trailing blank line -> one) that would legitimately reset stuck_count —
+# this fixture isolates the case the fix targets: STEADY-STATE notes-only
+# churn across consecutive rounds, not the one-time initial transition.
+cat >> "$CHECKLIST_T22" <<'NOTEOF'
+
+### Session 1 Notes
+Baseline notes so subsequent notes-only appends have a stable stripped shape.
+NOTEOF
+git -C "$T22" init -q
+git -C "$T22" config user.email test@test.local
+git -C "$T22" config user.name test
+git -C "$T22" add -A
+git -C "$T22" commit -q -m "initial fixture"
+seed_progress_fp "$T22" "doom-t22"
+
+# ── Round 1: notes-only commit → still reaches threshold (last-chance block) ──
+# No bump_fork_session here — mirrors Test 5 stage 1, which samples within the
+# fixture's initial fork generation (session_number=2, set by make_stop_fixture).
+cat >> "$CHECKLIST_T22" <<'NOTEOF'
+
+### Session 3 Notes
+Waiting on owner SSO login, nothing else changed.
+NOTEOF
+git -C "$T22" add -A
+git -C "$T22" commit -q -m "session 3 notes"
+
+OUT22A=$(run_stop_hook "$T22" "doom-t22" false)
+
+if echo "$OUT22A" | grep -q '"decision": *"block"' && echo "$OUT22A" | grep -q "LAST CHANCE"; then
+  pass "notes-only commit: still reaches doom threshold (last-chance block)"
+else
+  fail "notes-only commit: expected last-chance block despite notes-only commit" \
+    "$(echo "$OUT22A" | head -5)"
+fi
+
+if [[ "$(state_field "$T22" "doom-t22" "stuck_count")" == "2" ]]; then
+  pass "notes-only commit: stuck_count incremented (2) despite checklist+HEAD churn"
+else
+  fail "notes-only commit: expected stuck_count=2" \
+    "got: $(state_field "$T22" "doom-t22" "stuck_count")"
+fi
+
+# ── Round 2: another notes-only commit → terminate ──
+bump_fork_session "$T22" "doom-t22" 4
+cat >> "$CHECKLIST_T22" <<'NOTEOF'
+
+### Session 4 Notes
+Still waiting on owner SSO login.
+NOTEOF
+git -C "$T22" add -A
+git -C "$T22" commit -q -m "session 4 notes"
+
+run_stop_hook "$T22" "doom-t22" false >/dev/null
+
+if [[ "$(state_field "$T22" "doom-t22" "termination_reason")" == "doom_loop_detected" ]]; then
+  pass "notes-only commit: doom-loop still fires (termination_reason=doom_loop_detected)"
+else
+  fail "notes-only commit: doom-loop failed to fire across notes-only commits" \
+    "got: $(state_field "$T22" "doom-t22" "termination_reason")"
+fi
+
+# ── Control: a REAL code change resets stuck_count ──
+T22B=$(mktemp -d -t aeos-t22b-XXXX); _CLEANUP_DIRS+=("$T22B")
+make_stop_fixture "$T22B" "doom-t22b" 1 "" 0 5 2 false
+git -C "$T22B" init -q
+git -C "$T22B" config user.email test@test.local
+git -C "$T22B" config user.name test
+git -C "$T22B" add -A
+git -C "$T22B" commit -q -m "initial fixture"
+seed_progress_fp "$T22B" "doom-t22b"
+
+bump_fork_session "$T22B" "doom-t22b" 3
+echo "real change" > "$T22B/src_change.txt"
+git -C "$T22B" add -A
+git -C "$T22B" commit -q -m "actual code change"
+
+run_stop_hook "$T22B" "doom-t22b" false >/dev/null
+
+if [[ "$(state_field "$T22B" "doom-t22b" "stuck_count")" == "0" ]]; then
+  pass "control: a real non-checklist commit resets stuck_count to 0"
+else
+  fail "control: expected stuck_count=0 after real code change" \
+    "got: $(state_field "$T22B" "doom-t22b" "stuck_count")"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "========================================"
 echo "Test Results"
 echo "========================================"

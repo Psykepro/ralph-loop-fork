@@ -495,6 +495,39 @@ fi
 echo ""
 
 # ============================================================================
+# Test 12: stop-hook-reminders built-in default
+# ============================================================================
+echo "=== Test 12: stop-hook-reminders built-in default ==="
+
+# Test 12a: no --stop-hook-reminders → built-in default persisted (non-empty,
+# contains the interactive-background-command reminder)
+(cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+  --checklist checklist.md --name remdeftest >/dev/null 2>&1)
+STATE_FILE="$SETUP_DIR/.claude/ralph-fork/remdeftest/state.json"
+REMINDERS_VAL=$(jq -r '.stop_hook_reminders // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+if [[ -n "$REMINDERS_VAL" ]] && [[ "$REMINDERS_VAL" != "MISSING" ]] && [[ "$REMINDERS_VAL" != "null" ]] \
+   && grep -q "run_in_background" <<< "$REMINDERS_VAL"; then
+  pass "Default stop-hook-reminders persisted when flag omitted"
+else
+  fail "Default stop-hook-reminders persisted when flag omitted" \
+    "non-empty, mentions run_in_background" "$REMINDERS_VAL"
+fi
+
+# Test 12b: explicit --stop-hook-reminders APPENDS after the built-in default
+(cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+  --checklist checklist.md --name removrtest --stop-hook-reminders "custom text" >/dev/null 2>&1)
+STATE_FILE="$SETUP_DIR/.claude/ralph-fork/removrtest/state.json"
+REMINDERS_VAL=$(jq -r '.stop_hook_reminders // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
+if grep -q "run_in_background" <<< "$REMINDERS_VAL" && grep -q "custom text" <<< "$REMINDERS_VAL"; then
+  pass "Custom stop-hook-reminders appended after built-in default"
+else
+  fail "Custom stop-hook-reminders appended after built-in default" \
+    "contains both run_in_background and custom text" "$REMINDERS_VAL"
+fi
+
+echo ""
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo "========================================"
