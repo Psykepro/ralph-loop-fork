@@ -20,6 +20,10 @@ set -uo pipefail
 RALPH_FORK_DIR=".claude/ralph-fork"
 ARCHIVE_DIR_NAME=".archive"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib-herdr-backend.sh
+source "$SCRIPT_DIR/lib-herdr-backend.sh"
+
 # ============================================================================
 # Dependency checks (soft — we degrade gracefully)
 # ============================================================================
@@ -33,6 +37,11 @@ HAS_JQ=true
 if ! command -v jq >/dev/null 2>&1; then
   HAS_JQ=false
   echo "Warning: jq not found - using tmux-only fallback for session discovery" >&2
+fi
+
+HAS_HERDR=true
+if ! command -v herdr >/dev/null 2>&1; then
+  HAS_HERDR=false
 fi
 
 # ============================================================================
@@ -116,6 +125,87 @@ kill_tmux_session() {
   if tmux kill-session -t "=$session_name" 2>/dev/null; then
     echo "  Killed tmux session: $session_name"
   fi
+}
+
+# Close a single herdr pane if it exists. Never fails the script. Closing a
+# pane auto-closes its now-empty workspace (live-verified this session, see
+# D2 in the AEOS feature spec) — no separate `workspace close` call needed.
+kill_herdr_session() {
+  local pane_id="$1"
+
+  if [[ -z "$pane_id" ]] || [[ "$pane_id" == "null" ]]; then
+    return 0
+  fi
+
+  if [[ "$HAS_HERDR" != "true" ]]; then
+    return 0
+  fi
+
+  if herdr pane close "$pane_id" 2>/dev/null; then
+    echo "  Closed herdr pane: $pane_id"
+  fi
+}
+
+# Close a herdr WORKSPACE by id — used only by the fallback enumeration
+# path below, which discovers workspaces (not panes) via `herdr workspace
+# list`. `workspace close` tears down every pane the workspace has, so it's
+# a correct (if coarser) substitute for kill_herdr_session's pane-scoped
+# close when no stored pane_id is available.
+kill_herdr_workspace_by_id() {
+  local workspace_id="$1"
+
+  if [[ -z "$workspace_id" ]] || [[ "$workspace_id" == "null" ]]; then
+    return 0
+  fi
+
+  if [[ "$HAS_HERDR" != "true" ]]; then
+    return 0
+  fi
+
+  if herdr workspace close "$workspace_id" 2>/dev/null; then
+    echo "  Closed herdr workspace: $workspace_id"
+  fi
+}
+
+# Collect herdr pane ids to close for a given loop (herdr-backend analog of
+# collect_sessions_for_loop). Authoritative path only:
+# state.json .spawned_sessions[].pane_id. Returns pane ids, one per line.
+collect_herdr_panes_for_loop() {
+  local loop_id="$1"
+  local loop_dir
+  loop_dir=$(resolve_loop_dir "$loop_id")
+  local state_file=""
+  if [[ -n "$loop_dir" ]]; then
+    state_file="$loop_dir/state.json"
+  fi
+  local panes=""
+
+  if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
+    panes=$(jq -r '.spawned_sessions[]?.pane_id // empty' "$state_file" 2>/dev/null || true)
+  fi
+
+  if [[ -n "$panes" ]]; then
+    printf '%s\n' "$panes" | awk 'NF && !seen[$0]++'
+  fi
+}
+
+# Fallback herdr workspace ids for a loop when state.json's
+# spawned_sessions[] itself is unreadable/empty — `herdr workspace list`
+# filtered by the SAME sanitized label prefix herdr_derive_prefix produces
+# (NOT the raw "ralph-<LOOP_ID>-" string, which never matches a written
+# label). Returns workspace ids, one per line.
+collect_herdr_workspaces_fallback() {
+  local loop_id="$1"
+
+  if [[ "$HAS_HERDR" != "true" ]]; then
+    return 0
+  fi
+
+  local prefix
+  prefix=$(herdr_derive_prefix "$loop_id")
+  herdr workspace list 2>/dev/null \
+    | jq -r --arg p "$prefix" '.result.workspaces[]? | select(.label | startswith($p)) | .workspace_id' 2>/dev/null \
+    | awk 'NF && !seen[$0]++' || true
 }
 
 # Collect tmux session names to kill for a given loop.
@@ -223,11 +313,27 @@ cancel_loop() {
   #    by then the durable cleanup is already done.
   # 4. Print worktree cleanup hint AFTER kill (the worktree dir itself is left
   #    in place so the user can inspect it before removing).
-  local sessions worktree_path
-  sessions=$(collect_sessions_for_loop "$loop_id")
+  local sessions worktree_path backend herdr_panes herdr_workspaces_fallback
+  local state_file="$loop_dir/state.json"
+
+  # Determine backend BEFORE the state dir is deleted below — default
+  # "tmux" mirrors the same fallback pattern used everywhere else this
+  # field is read (pre-v0.13.0 state files have no "backend" key at all).
+  backend="tmux"
+  if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
+    backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
+  fi
+
+  if [[ "$backend" == "herdr" ]]; then
+    herdr_panes=$(collect_herdr_panes_for_loop "$loop_id")
+    if [[ -z "$herdr_panes" ]]; then
+      herdr_workspaces_fallback=$(collect_herdr_workspaces_fallback "$loop_id")
+    fi
+  else
+    sessions=$(collect_sessions_for_loop "$loop_id")
+  fi
 
   worktree_path=""
-  local state_file="$loop_dir/state.json"
   if [[ "$HAS_JQ" == "true" ]] && [[ -f "$state_file" ]]; then
     worktree_path=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null || true)
   fi
@@ -237,12 +343,26 @@ cancel_loop() {
     echo "  Removed state directory: $loop_dir"
   fi
 
-  if [[ -n "$sessions" ]]; then
-    while IFS= read -r session_name; do
-      kill_tmux_session "$session_name"
-    done <<< "$sessions"
+  if [[ "$backend" == "herdr" ]]; then
+    if [[ -n "${herdr_panes:-}" ]]; then
+      while IFS= read -r pane_id; do
+        kill_herdr_session "$pane_id"
+      done <<< "$herdr_panes"
+    elif [[ -n "${herdr_workspaces_fallback:-}" ]]; then
+      while IFS= read -r workspace_id; do
+        kill_herdr_workspace_by_id "$workspace_id"
+      done <<< "$herdr_workspaces_fallback"
+    else
+      echo "  No herdr panes/workspaces found to close."
+    fi
   else
-    echo "  No tmux sessions found to kill."
+    if [[ -n "$sessions" ]]; then
+      while IFS= read -r session_name; do
+        kill_tmux_session "$session_name"
+      done <<< "$sessions"
+    else
+      echo "  No tmux sessions found to kill."
+    fi
   fi
 
   # Worktree cleanup hint (worktree itself is NOT auto-removed — user may want
