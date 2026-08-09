@@ -164,11 +164,23 @@ NO_CLEANUP=false
 LOOP_NAME=""
 ON_COMPLETION_CMD=""
 STOP_HOOK_REMINDERS=""
+# Always-on default — appended to every loop's stop-hook-reminders regardless
+# of whether --stop-hook-reminders is passed (never a replacement; see the
+# append step after arg parsing). Root cause: a foreground Bash call that
+# blocks on out-of-band human action (SSO/OAuth browser login) hits the Bash
+# tool's own timeout, ends the turn, and — with no run_in_background task
+# pending — the Stop hook has no reason to defer, so it forks a fresh session
+# that just re-runs the same blocking login and repeats forever.
+DEFAULT_STOP_HOOK_REMINDER="IMPORTANT: any interactive/human-attended blocking command (SSO login, OAuth device flow, browser-based auth, or anything else that pauses waiting on a human outside this session) MUST be launched via Bash with run_in_background:true, then waited on with Monitor (poll-until-done), never as a plain foreground Bash call. A plain foreground call will hit the Bash tool's timeout before the human finishes, end the turn, and cause this loop to fork a new session that just repeats the same blocked command."
 WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 BASE_REF=""
 COPY_PATHS=""
+# Backend for session spawn/kill/list: "tmux" (default, unchanged behavior)
+# or "herdr" (opt-in, uses herdr's socket-API CLI instead of tmux). See
+# scripts/fork-terminal-herdr.sh and stop-hook-fork.sh's backend branches.
+BACKEND="tmux"
 # P3 built-in default — single source of truth; scripts/fork-terminal.sh's
 # read-back fallback reuses the SAME values (kept in sync by
 # tests/test-model-resolution.sh). Consumers: resolve_model_effort() below,
@@ -222,6 +234,11 @@ OPTIONS:
                              when --worktree is not passed.
   --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
                              (space-separated inside a single quoted arg)
+  --backend <tmux|herdr>     Session spawn/kill/list backend (default: tmux).
+                             "herdr" uses herdr's socket-API CLI instead of
+                             tmux -- requires a running herdr server. tmux
+                             remains required regardless of this flag (still
+                             the default, and always dependency-checked).
   --model <name>             Pin the Claude model for all SPAWNED sessions
                              (e.g., sonnet, opus, haiku, or a full model id).
   --effort <level>           Pin the reasoning effort for all SPAWNED sessions
@@ -471,6 +488,20 @@ HELP_EOF
       COPY_PATHS="$2"
       shift 2
       ;;
+    --backend)
+      if [[ -z "${2:-}" ]]; then
+        _err "--backend requires an argument" "Allowed: tmux, herdr"
+        exit 1
+      fi
+      case "$2" in
+        tmux|herdr) BACKEND="$2" ;;
+        *)
+          _err "--backend must be 'tmux' or 'herdr'" "Got: $2"
+          exit 1
+          ;;
+      esac
+      shift 2
+      ;;
     --model)
       if [[ -z "${2:-}" ]]; then
         _err "--model requires a model name argument" "Example: --model sonnet"
@@ -512,6 +543,18 @@ HELP_EOF
       ;;
   esac
 done
+
+# Compose stop-hook-reminders: the built-in default is always present;
+# any explicit --stop-hook-reminders text (or file) APPENDS after it rather
+# than replacing it, so the loop always carries the interactive-blocking-
+# command reminder even when the caller forgot to pass the flag.
+if [[ -n "$STOP_HOOK_REMINDERS" ]]; then
+  STOP_HOOK_REMINDERS="${DEFAULT_STOP_HOOK_REMINDER}
+
+${STOP_HOOK_REMINDERS}"
+else
+  STOP_HOOK_REMINDERS="$DEFAULT_STOP_HOOK_REMINDER"
+fi
 
 # Validate required --checklist argument (unless resuming)
 if [[ "$RESUME" != "true" ]] && [[ -z "$CHECKLIST_FILE" ]]; then
@@ -741,6 +784,7 @@ else
   "effort": $EFFORT_JSON,
   "model_source": "$MODEL_SOURCE",
   "effort_source": "$EFFORT_SOURCE",
+  "backend": "$BACKEND",
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "fork_history": [],
   "awaiting_checklist_update": false,
@@ -774,7 +818,8 @@ EOF
   echo "No cleanup: $NO_CLEANUP"
   echo "Completion promise: $(if [[ "$COMPLETION_PROMISE" != "null" ]]; then echo "$COMPLETION_PROMISE"; else echo "none (runs until budget)"; fi)"
   echo "On-completion: $(if [[ -n "$ON_COMPLETION_CMD" ]]; then echo "$ON_COMPLETION_CMD"; else echo "none"; fi)"
-  echo "Stop-hook-reminders: $(if [[ -n "$STOP_HOOK_REMINDERS" ]]; then echo "configured (${#STOP_HOOK_REMINDERS} chars)"; else echo "none"; fi)"
+  echo "Stop-hook-reminders:"
+  echo "$STOP_HOOK_REMINDERS" | sed 's/^/  /'
   echo "Model: $MODEL ($MODEL_SOURCE), Effort: $EFFORT ($EFFORT_SOURCE)"
   echo ""
   echo "State directory: $LOOP_DIR"

@@ -257,6 +257,26 @@ update_state() {
 cleanup_current_session() {
   local loop_id="$1"
   local session_number="$2"
+  local state_file="${3:-}"
+
+  local backend="tmux"
+  if [[ -n "$state_file" ]] && [[ -f "$state_file" ]]; then
+    backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
+  fi
+
+  if [[ "$backend" == "herdr" ]]; then
+    local pane_id
+    pane_id=$(jq -r --argjson n "$session_number" \
+      '.spawned_sessions[]? | select(.session_number == $n) | .pane_id' \
+      "$state_file" 2>/dev/null | head -1)
+    debug_log "Cleaning up current herdr session: loop=$loop_id session=$session_number pane=$pane_id"
+    if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
+      info "   Removed previous herdr pane: $pane_id"
+    else
+      debug_log "herdr pane for session $session_number not found or already removed"
+    fi
+    return 0
+  fi
 
   local session_name="ralph-${loop_id}-${session_number}"
   debug_log "Cleaning up current session: $session_name"
@@ -294,10 +314,44 @@ cleanup_ralph_sessions() {
 
   info "Cleaning up ralph sessions for loop: $loop_id..."
 
-  # Get spawned session names from state.json
+  local backend
+  backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
+
+  # Kill primitive dispatch: tmux session-name kill, or herdr pane close.
+  # herdr entries were never recorded into original_session_name (only
+  # tmux's very-first-launch path populates that field — D6's worktree-mode
+  # herdr spawn records into spawned_sessions[] like every other herdr
+  # fork), so the "no forks occurred, kill original_session" path below is
+  # inert for herdr loops by construction, not specially branched.
+  _kill_one() {
+    local target="$1"
+    if [[ "$backend" == "herdr" ]]; then
+      if herdr pane close "$target" 2>/dev/null; then
+        info "   Removed: $target"
+        debug_log "Successfully closed herdr pane: $target"
+      else
+        debug_log "herdr pane already closed or not found: $target"
+      fi
+    else
+      if tmux kill-session -t "=$target" 2>/dev/null; then
+        info "   Removed: $target"
+        debug_log "Successfully removed: $target"
+      else
+        debug_log "Failed to remove or not found: $target"
+      fi
+    fi
+  }
+
+  # Get spawned session identifiers from state.json — tmux backend keys by
+  # session NAME, herdr backend keys by PANE_ID (the authoritative teardown
+  # target; herdr agent names are for prompt/read targeting, not teardown).
   local session_names
-  session_names=$(jq -r '.spawned_sessions[]?.name // empty' "$state_file" 2>/dev/null)
-  debug_log "Sessions to cleanup: $session_names"
+  if [[ "$backend" == "herdr" ]]; then
+    session_names=$(jq -r '.spawned_sessions[]?.pane_id // empty' "$state_file" 2>/dev/null)
+  else
+    session_names=$(jq -r '.spawned_sessions[]?.name // empty' "$state_file" 2>/dev/null)
+  fi
+  debug_log "Sessions to cleanup ($backend): $session_names"
 
   # Read original session name (for single-session completions with no forks)
   local original_session
@@ -311,22 +365,21 @@ cleanup_ralph_sessions() {
       info "   Preserving original session: $original_session (--preserve-final-session, no forks)"
     else
       debug_log "No forks occurred - removing original session: $original_session"
-      if tmux kill-session -t "=$original_session" 2>/dev/null; then
-        info "   Removed original session: $original_session"
-        debug_log "Successfully removed original: $original_session"
-      else
-        debug_log "Failed to remove or not found: $original_session"
-      fi
+      _kill_one "$original_session"
     fi
     info "   Cleanup complete."
     debug_log "cleanup_ralph_sessions finished (no-fork path)"
     return
   fi
 
-  # Get the last session name if we need to preserve it
+  # Get the last session identifier if we need to preserve it
   local last_session=""
   if [[ "$preserve_final" == "true" ]]; then
-    last_session=$(jq -r '.spawned_sessions[-1]?.name // empty' "$state_file" 2>/dev/null)
+    if [[ "$backend" == "herdr" ]]; then
+      last_session=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$state_file" 2>/dev/null)
+    else
+      last_session=$(jq -r '.spawned_sessions[-1]?.name // empty' "$state_file" 2>/dev/null)
+    fi
     debug_log "Preserving final session: $last_session"
     info "   Preserving final session: $last_session (--preserve-final-session)"
   fi
@@ -339,28 +392,23 @@ cleanup_ralph_sessions() {
         continue
       fi
       debug_log "Removing session: $session_name"
-      if tmux kill-session -t "=$session_name" 2>/dev/null; then
-        info "   Removed: $session_name"
-        debug_log "Successfully removed: $session_name"
-      else
-        debug_log "Failed to remove or not found: $session_name"
-      fi
+      _kill_one "$session_name"
     fi
   done
 
   # Also remove the original session (if not preserved and forks occurred)
   if [[ -n "$original_session" ]] && [[ "$preserve_final" != "true" ]]; then
     debug_log "Removing original session: $original_session"
-    if tmux kill-session -t "=$original_session" 2>/dev/null; then
-      info "   Removed original: $original_session"
-    else
-      debug_log "Original session already removed or not found: $original_session"
-    fi
+    _kill_one "$original_session"
   fi
 
   # Clear the spawned_sessions array after cleanup (keep final if preserved)
   if [[ "$preserve_final" == "true" ]] && [[ -n "$last_session" ]]; then
-    update_state "$state_file" ".spawned_sessions = [{\"name\": \"$last_session\", \"preserved\": true}]"
+    if [[ "$backend" == "herdr" ]]; then
+      update_state "$state_file" ".spawned_sessions = [{\"pane_id\": \"$last_session\", \"preserved\": true}]"
+    else
+      update_state "$state_file" ".spawned_sessions = [{\"name\": \"$last_session\", \"preserved\": true}]"
+    fi
   else
     update_state "$state_file" ".spawned_sessions = []"
   fi
@@ -965,9 +1013,16 @@ spawn_new_session() {
   debug_log "SPAWNING new session $session_number for loop $loop_id"
   debug_log "PROJECT_ROOT for fork: $project_root"
 
+  local backend
+  backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
+
   # Execute fork script - MUST pass project_root so it can cd there first
   # This fixes the bug where hook runs from subdirectory after Claude cd's
-  "$plugin_root/scripts/fork-terminal.sh" "$loop_id" "$session_number" "$project_root"
+  if [[ "$backend" == "herdr" ]]; then
+    "$plugin_root/scripts/fork-terminal-herdr.sh" "$loop_id" "$session_number" "$project_root"
+  else
+    "$plugin_root/scripts/fork-terminal.sh" "$loop_id" "$session_number" "$project_root"
+  fi
 
   info "Ralph Loop Fork [$loop_id]: Spawned session $session_number"
 }
