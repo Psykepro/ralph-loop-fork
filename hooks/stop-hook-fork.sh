@@ -521,29 +521,49 @@ if [[ "$NO_CLEANUP" == "true" ]]; then
 else
   # Read session info from state file
   if [[ -f "$STATE_FILE" ]]; then
+    BACKEND=$(jq -r '.backend // "tmux"' "$STATE_FILE" 2>/dev/null)
     SESSION_NAMES=$(jq -r '.spawned_sessions[]?.name // empty' "$STATE_FILE" 2>/dev/null)
     ORIGINAL_SESSION=$(jq -r '.original_session_name // empty' "$STATE_FILE" 2>/dev/null)
     LAST_SESSION=$(jq -r '.spawned_sessions[-1]?.name // empty' "$STATE_FILE" 2>/dev/null)
 
+    log "Backend: $BACKEND"
     log "Sessions to cleanup: $SESSION_NAMES"
     log "Original session: $ORIGINAL_SESSION"
     log "Last session (preserve if needed): $LAST_SESSION"
 
-    # Remove spawned sessions (except last if preserve_final)
-    for session_name in $SESSION_NAMES; do
-      if [[ -n "$session_name" ]]; then
+    if [[ "$BACKEND" == "herdr" ]]; then
+      # herdr targets panes by pane_id, not by session name -- iterate the
+      # spawned_sessions[] objects to pair each name with its pane_id.
+      while IFS=$'\t' read -r session_name pane_id; do
+        [[ -z "$session_name" ]] && continue
         if [[ "$PRESERVE_FINAL" == "true" ]] && [[ "$session_name" == "$LAST_SESSION" ]]; then
           log "Preserving final session: $session_name"
           continue
         fi
-        log "Removing session: $session_name"
-        if tmux kill-session -t "=$session_name" 2>/dev/null; then
+        log "Removing session: $session_name (pane $pane_id)"
+        if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
           log "Removed: $session_name"
         else
           log "Failed to remove or not found: $session_name"
         fi
-      fi
-    done
+      done < <(jq -r '.spawned_sessions[]? | [.name, (.pane_id // "")] | @tsv' "$STATE_FILE" 2>/dev/null)
+    else
+      # Remove spawned sessions (except last if preserve_final)
+      for session_name in $SESSION_NAMES; do
+        if [[ -n "$session_name" ]]; then
+          if [[ "$PRESERVE_FINAL" == "true" ]] && [[ "$session_name" == "$LAST_SESSION" ]]; then
+            log "Preserving final session: $session_name"
+            continue
+          fi
+          log "Removing session: $session_name"
+          if tmux kill-session -t "=$session_name" 2>/dev/null; then
+            log "Removed: $session_name"
+          else
+            log "Failed to remove or not found: $session_name"
+          fi
+        fi
+      done
+    fi
 
     # NEW: Remove original session if preserving final and spawned sessions exist
     if [[ "$PRESERVE_FINAL" == "true" ]] && [[ -n "$ORIGINAL_SESSION" ]] && [[ -n "$LAST_SESSION" ]]; then
