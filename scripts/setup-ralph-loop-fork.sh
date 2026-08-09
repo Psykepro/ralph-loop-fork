@@ -12,6 +12,8 @@ set -euo pipefail
 
 # Resolve plugin root for direct invocation (when CLAUDE_PLUGIN_ROOT is unset).
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# shellcheck source=./lib-herdr-backend.sh
+source "$PLUGIN_ROOT/scripts/lib-herdr-backend.sh"
 
 # Colors only when the stream is a real terminal (tmux attach, direct runs).
 # Captured output (Claude Code slash commands) shows raw escape bytes as
@@ -1013,8 +1015,6 @@ if [[ "$WORKTREE" == "true" ]]; then
   mv "$TMP_STATE" "$MOVED_STATE_FILE"
 
   # Launch the initial Claude session inside the worktree.
-  SESSION_NAME="ralph-$LOOP_ID-1"
-  INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
   # MODEL/EFFORT are resolved (never empty) by resolve_model_effort() above —
   # assert defensively so a resolver regression can never silently spawn with
   # no flag (worse than the original leak: the ambient user-settings model
@@ -1023,6 +1023,86 @@ if [[ "$WORKTREE" == "true" ]]; then
     _err "Refusing to spawn: model/effort resolved empty" "model='$MODEL' effort='$EFFORT'"
     exit 1
   fi
+
+  if [[ "$BACKEND" == "herdr" ]]; then
+    INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
+    AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
+
+    WS_JSON=$(herdr workspace create --cwd "$WORKTREE_PATH_ABS" --label "$AGENT_NAME" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
+      _err "herdr workspace create failed"
+      exit 1
+    }
+    WS_ID=$(echo "$WS_JSON" | jq -r '.result.workspace.workspace_id')
+    PANE_ID=$(echo "$WS_JSON" | jq -r '.result.root_pane.pane_id')
+    if [[ -z "$WS_ID" ]] || [[ "$WS_ID" == "null" ]] || [[ -z "$PANE_ID" ]] || [[ "$PANE_ID" == "null" ]]; then
+      _err "herdr workspace create did not return workspace_id/pane_id" "Response: $WS_JSON"
+      exit 1
+    fi
+
+    # Env sanitation: see fork-terminal-herdr.sh's identical step — the
+    # herdr daemon's own environment may carry CLAUDECODE=1 (live-verified
+    # this session), which would otherwise silently kill the spawned claude.
+    herdr pane run "$PANE_ID" 'unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL' \
+      || echo "⚠️  env sanitation pane run failed (non-fatal, continuing)" >&2
+
+    AGENT_START_OK=false
+    for delay in 0 0.5 1 2; do
+      if [[ "$delay" != "0" ]]; then
+        sleep "$delay"
+      fi
+      if herdr agent start "$AGENT_NAME" --kind claude --pane "$PANE_ID" -- --dangerously-skip-permissions --model "$MODEL" --effort "$EFFORT"; then
+        AGENT_START_OK=true
+        break
+      fi
+    done
+
+    if [[ "$AGENT_START_OK" != "true" ]]; then
+      _err "herdr agent start failed after retries"
+      herdr pane close "$PANE_ID" 2>/dev/null || true
+      exit 1
+    fi
+
+    herdr agent prompt "$AGENT_NAME" "$INIT_MSG" || {
+      echo "⚠️  herdr agent prompt reported failure" >&2
+    }
+    herdr agent send-keys "$AGENT_NAME" Enter || {
+      echo "⚠️  herdr agent send-keys Enter failed" >&2
+    }
+
+    SESSION_ENTRY=$(jq -n \
+      --arg name "$AGENT_NAME" \
+      --arg agent_name "$AGENT_NAME" \
+      --arg ws "$WS_ID" \
+      --arg pane "$PANE_ID" \
+      --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{name: $name, agent_name: $agent_name, workspace_id: $ws, pane_id: $pane, started_at: $started, session_number: 1}')
+    jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
+      "$MOVED_STATE_FILE" > "$TMP_STATE"
+    mv "$TMP_STATE" "$MOVED_STATE_FILE"
+
+    trap - EXIT
+
+    echo ""
+    echo "${GRN_O}=================================================================${RST_O}"
+    echo "${GRN_O} ✅ Worktree mode — loop started in isolation (herdr backend)${RST_O}"
+    echo "${GRN_O}=================================================================${RST_O}"
+    echo " Worktree:  $WORKTREE_PATH_ABS"
+    echo " Branch:    $BRANCH_NAME"
+    echo " Agent:     $AGENT_NAME (workspace $WS_ID, pane $PANE_ID)"
+    echo ""
+    echo " Read:      herdr agent read $AGENT_NAME"
+    echo " Cancel:    /ralph-loop-fork:cancel-ralph-fork $LOOP_ID"
+    echo ""
+    echo " When the loop finishes, merge or discard the branch:"
+    echo "   git merge $BRANCH_NAME"
+    echo "   git worktree remove $WORKTREE_PATH_ABS"
+    echo "   git branch -D $BRANCH_NAME"
+    echo "================================================================="
+    exit 0
+  fi
+
+  SESSION_NAME="ralph-$LOOP_ID-1"
+  INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
   MODEL_FLAG=" --model $MODEL"
   EFFORT_FLAG=" --effort $EFFORT"
   # Unset ANTHROPIC_MODEL/CLAUDE_CODE_EFFORT_LEVEL — the tmux server's global
