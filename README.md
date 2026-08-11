@@ -1,8 +1,9 @@
 # Ralph Loop Fork
 
 Fork-based Ralph Loop that keeps each session's context window fresh by
-spawning a **new tmux session** when a session's iteration limit is reached.
-Unlike the standard ralph-loop which re-feeds the prompt into the same session
+spawning a **new terminal session** — via herdr's socket-API CLI by default,
+or plain tmux with `--backend tmux` — when a session's iteration limit is
+reached. Unlike the standard ralph-loop which re-feeds the prompt into the same session
 until context accumulates and the model degrades, this version forks a
 brand-new Claude process at the configured boundary and tracks all state in
 files so work persists across sessions.
@@ -62,7 +63,8 @@ Restart Claude Code — plugins are discovered at startup. Then run:
 | Dependency | Required | Notes |
 |---|---|---|
 | `jq` | Always | JSON state management |
-| `tmux` | Always | Session forking |
+| `herdr` (server running) | Default backend | Session forking; skip with `--backend tmux` |
+| `tmux` | `--backend tmux` only | Session forking for the tmux backend |
 | `xxd` | Always | Loop ID generation |
 | `git ≥ 2.5` | `--worktree` only | Worktree subcommand |
 | `claude` CLI | `--worktree` only | Launched inside the worktree |
@@ -361,9 +363,25 @@ This means:
 - A slow or crashed session that recovers late cannot cause a double-fork.
 - You can `tmux attach` to any session for inspection without disrupting the loop.
 
-### tmux session management
+### Session management
 
-Sessions are named `ralph-{LOOP_ID}-{N}`:
+Sessions are named `ralph-{LOOP_ID}-{N}` regardless of backend.
+
+**Default backend (herdr):**
+
+```bash
+# Watch all active ralph sessions
+herdr agent list | grep ralph
+
+# Read a specific session's output
+herdr agent read ralph-auth-refactor-2
+
+# The loop manages cleanup automatically on completion
+# For manual intervention:
+herdr pane close <pane_id>   # get pane_id from `herdr agent list`
+```
+
+**`--backend tmux`:**
 
 ```bash
 # Watch all active ralph sessions

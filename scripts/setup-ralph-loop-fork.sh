@@ -179,10 +179,12 @@ WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 BASE_REF=""
 COPY_PATHS=""
-# Backend for session spawn/kill/list: "tmux" (default, unchanged behavior)
-# or "herdr" (opt-in, uses herdr's socket-API CLI instead of tmux). See
-# scripts/fork-terminal-herdr.sh and stop-hook-fork.sh's backend branches.
-BACKEND="tmux"
+# Backend for session spawn/kill/list: "herdr" (default -- uses herdr's
+# socket-API CLI; requires a running herdr server, checked below) or "tmux"
+# (explicit opt-in/fallback). See scripts/fork-terminal-herdr.sh and
+# stop-hook-fork.sh's backend branches. Flipped to herdr-default 2026-08-11
+# once the herdr backend's live E2E kill-criterion (AC1) was met.
+BACKEND="herdr"
 # P3 built-in default — single source of truth; scripts/fork-terminal.sh's
 # read-back fallback reuses the SAME values (kept in sync by
 # tests/test-model-resolution.sh). Consumers: resolve_model_effort() below,
@@ -236,11 +238,13 @@ OPTIONS:
                              when --worktree is not passed.
   --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
                              (space-separated inside a single quoted arg)
-  --backend <tmux|herdr>     Session spawn/kill/list backend (default: tmux).
-                             "herdr" uses herdr's socket-API CLI instead of
-                             tmux -- requires a running herdr server. tmux
-                             remains required regardless of this flag (still
-                             the default, and always dependency-checked).
+  --backend <tmux|herdr>     Session spawn/kill/list backend (default: herdr).
+                             "herdr" uses herdr's socket-API CLI -- requires
+                             a running herdr server (checked at startup; the
+                             error message tells you how to start it or fall
+                             back to --backend tmux for this run). "tmux" is
+                             the explicit opt-in/fallback; requires tmux on
+                             PATH, checked only when this flag selects it.
   --model <name>             Pin the Claude model for all SPAWNED sessions
                              (e.g., sonnet, opus, haiku, or a full model id).
   --effort <level>           Pin the reasoning effort for all SPAWNED sessions
@@ -264,7 +268,7 @@ OPTIONS:
 PARALLEL SESSIONS:
   Each loop is isolated in its own directory: .claude/ralph-fork/{LOOP_ID}/
   Sessions are named: ralph-{LOOP_ID}-{N} (e.g., ralph-my-feature-1)
-  Managed via plain tmux sessions
+  Managed via herdr by default, or plain tmux with --backend tmux
 
   Run multiple loops in parallel:
     Terminal 1: /ralph-loop-fork:ralph-loop-fork --checklist checklist-a.md --name "task-a"
@@ -618,16 +622,54 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
-if ! command -v tmux &> /dev/null; then
+if [[ "$BACKEND" == "tmux" ]] && ! command -v tmux &> /dev/null; then
   if [[ -n "${MSYSTEM:-}" ]] || [[ "$(uname -s 2>/dev/null)" == MINGW* ]] || [[ "$(uname -s 2>/dev/null)" == MSYS* ]]; then
     _err "tmux is required but was not found" \
       "On Windows: tmux does not run on native Windows / Git Bash." \
-      "Install WSL2 and run this from inside WSL."
+      "Install WSL2 and run this from inside WSL." \
+      "Or drop --backend tmux to use the default herdr backend instead."
   else
     _err "tmux is required but was not found" \
-      "Run /ralph-loop-fork:init-ralph-fork to auto-install all dependencies."
+      "Run /ralph-loop-fork:init-ralph-fork to auto-install all dependencies." \
+      "Or drop --backend tmux to use the default herdr backend instead."
   fi
   exit 1
+fi
+
+if [[ "$BACKEND" == "herdr" ]]; then
+  if ! command -v herdr &> /dev/null; then
+    _err "herdr is required for the default herdr backend but was not found" \
+      "Install herdr, or pass --backend tmux to use tmux instead (also requires tmux on PATH)."
+    exit 1
+  fi
+  # Match the known-good "status: running" text rather than trust the exit
+  # code alone -- `herdr status`'s failure exit code is not verified in this
+  # codebase (nothing to safely test it against: forcing the real server
+  # down to check would disrupt the user's live workspaces/dashboard).
+  # Retried (0/0.5/1s, matching the agent_pane_busy backoff pattern used
+  # elsewhere in the herdr backend) -- a transient socket round-trip delay
+  # under momentary load was observed to fail this check ~8% of the time in
+  # back-to-back stress testing, never on an isolated call.
+  HERDR_STATUS_OUT=""
+  HERDR_REACHABLE=false
+  for delay in 0 0.5 1; do
+    if [[ "$delay" != "0" ]]; then
+      sleep "$delay"
+    fi
+    HERDR_STATUS_OUT=$(herdr status 2>&1) || true
+    if grep -q "status: running" <<< "$HERDR_STATUS_OUT"; then
+      HERDR_REACHABLE=true
+      break
+    fi
+  done
+  if [[ "$HERDR_REACHABLE" != "true" ]]; then
+    _err "herdr server is not reachable" \
+      "The default backend is herdr, which requires a running herdr server." \
+      "Start it with: herdr server" \
+      "Or pass --backend tmux to use tmux instead for this run." \
+      "herdr status output: $HERDR_STATUS_OUT"
+    exit 1
+  fi
 fi
 
 # Generate loop ID if not provided

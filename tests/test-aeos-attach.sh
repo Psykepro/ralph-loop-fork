@@ -139,7 +139,7 @@ OUT1=$(mktemp); ERR1=$(mktemp)
 cd "$R1"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "aeos-nwt" --total-budget 1 --max-per-session 1 \
+  --name "aeos-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
   >"$OUT1" 2>"$ERR1"
 RC1=$?
 cd - >/dev/null
@@ -182,6 +182,7 @@ cd "$R2"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
   --name "aeos-wt" --total-budget 1 --max-per-session 1 --worktree --base-ref HEAD \
+  --backend tmux \
   >"$OUT2" 2>"$ERR2"
 RC2=$?
 cd - >/dev/null
@@ -223,7 +224,7 @@ OUT3=$(mktemp); ERR3=$(mktemp)
 cd "$R3"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "sa-nwt" --total-budget 1 --max-per-session 1 \
+  --name "sa-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
   >"$OUT3" 2>"$ERR3"
 RC3=$?
 cd - >/dev/null
@@ -271,7 +272,7 @@ OUT4=$(mktemp); ERR4=$(mktemp)
 cd "$R4"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "fail-nwt" --total-budget 1 --max-per-session 1 \
+  --name "fail-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
   >"$OUT4" 2>"$ERR4"
 RC4=$?
 cd - >/dev/null

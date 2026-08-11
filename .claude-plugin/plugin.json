@@ -1,7 +1,7 @@
 {
   "name": "ralph-loop-fork",
-  "version": "0.12.0",
-  "description": "Fork-based Ralph Loop - spawns NEW terminal sessions on each iteration via tmux. Maximizes context window by starting fresh each iteration while persisting state across sessions.",
+  "version": "0.13.0",
+  "description": "Fork-based Ralph Loop - spawns NEW terminal sessions on each iteration via herdr (default) or tmux (--backend tmux). Maximizes context window by starting fresh each iteration while persisting state across sessions.",
   "author": {
     "name": "Nikolay Nedkov",
     "email": "nikolai_nedkov@yahoo.com"
