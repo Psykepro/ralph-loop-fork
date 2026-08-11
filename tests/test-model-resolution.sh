@@ -40,7 +40,7 @@ run_setup() {
   local dir="$1"; shift
   local name="$1"; shift
   ( cd "$dir" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-      --checklist checklist.md --name "$name" "$@" )
+      --checklist checklist.md --name "$name" --backend tmux "$@" )
 }
 
 state_field() {

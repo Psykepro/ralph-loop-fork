@@ -455,7 +455,7 @@ echo "- [ ] task" > "$SETUP_DIR/checklist.md"
 
 # Test 11a: no --model/--effort → defaults sonnet/medium persisted
 (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-  --checklist checklist.md --name deftest >/dev/null 2>&1)
+  --checklist checklist.md --name deftest --backend tmux >/dev/null 2>&1)
 STATE_FILE="$SETUP_DIR/.claude/ralph-fork/deftest/state.json"
 MODEL_VAL=$(jq -r '.model // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
 EFFORT_VAL=$(jq -r '.effort // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
@@ -468,7 +468,7 @@ fi
 
 # Test 11b: explicit --model/--effort override the defaults
 (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-  --checklist checklist.md --name ovrtest --model opus --effort high >/dev/null 2>&1)
+  --checklist checklist.md --name ovrtest --model opus --effort high --backend tmux >/dev/null 2>&1)
 STATE_FILE="$SETUP_DIR/.claude/ralph-fork/ovrtest/state.json"
 MODEL_VAL=$(jq -r '.model // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
 EFFORT_VAL=$(jq -r '.effort // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
@@ -481,7 +481,7 @@ fi
 
 # Test 11c: invalid --effort value is rejected loudly, no state written
 SETUP_OUT=$( (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-  --checklist checklist.md --name badtest --effort turbo 2>&1) )
+  --checklist checklist.md --name badtest --effort turbo --backend tmux 2>&1) )
 SETUP_RC=$?
 if [[ $SETUP_RC -ne 0 ]] && grep -q "effort" <<< "$SETUP_OUT" \
    && [[ ! -f "$SETUP_DIR/.claude/ralph-fork/badtest/state.json" ]]; then
@@ -502,7 +502,7 @@ echo "=== Test 12: stop-hook-reminders built-in default ==="
 # Test 12a: no --stop-hook-reminders → built-in default persisted (non-empty,
 # contains the interactive-background-command reminder)
 (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-  --checklist checklist.md --name remdeftest >/dev/null 2>&1)
+  --checklist checklist.md --name remdeftest --backend tmux >/dev/null 2>&1)
 STATE_FILE="$SETUP_DIR/.claude/ralph-fork/remdeftest/state.json"
 REMINDERS_VAL=$(jq -r '.stop_hook_reminders // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
 if [[ -n "$REMINDERS_VAL" ]] && [[ "$REMINDERS_VAL" != "MISSING" ]] && [[ "$REMINDERS_VAL" != "null" ]] \
@@ -515,7 +515,7 @@ fi
 
 # Test 12b: explicit --stop-hook-reminders APPENDS after the built-in default
 (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-  --checklist checklist.md --name removrtest --stop-hook-reminders "custom text" >/dev/null 2>&1)
+  --checklist checklist.md --name removrtest --stop-hook-reminders "custom text" --backend tmux >/dev/null 2>&1)
 STATE_FILE="$SETUP_DIR/.claude/ralph-fork/removrtest/state.json"
 REMINDERS_VAL=$(jq -r '.stop_hook_reminders // "MISSING"' "$STATE_FILE" 2>/dev/null || echo "NO_STATE")
 if grep -q "run_in_background" <<< "$REMINDERS_VAL" && grep -q "custom text" <<< "$REMINDERS_VAL"; then
