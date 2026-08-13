@@ -2,10 +2,10 @@
 
 # Ralph Loop Fork — Worktree Setup
 #
-# Creates a git worktree on a new branch and populates it with the minimum
-# files needed to run the loop in isolation: CLAUDE.md, a curated subset of
-# .claude/, the checklist directory, .env* files, and any user-supplied
-# extra paths.
+# Creates a git worktree on a new branch and populates it with the files
+# needed to run the loop in isolation: CLAUDE.md, the full .claude/ dir, the
+# full _project/ dir, the checklist directory, .env* files, and any
+# user-supplied extra paths.
 #
 # Usage:
 #   setup-worktree.sh LOOP_ID WORKTREE_PATH BRANCH BASE_REF CHECKLIST_DIR [COPY_PATHS...]
@@ -92,15 +92,24 @@ if [[ -f "CLAUDE.md" ]]; then
   cp "CLAUDE.md" "$WORKTREE_ABS/" >&2
 fi
 
-# Selective .claude/ copy. Avoids copying .claude/.archive or other dirs
-# that may contain nested .claude trees from previous worktree runs.
+# Full .claude/ copy. A curated allowlist here has repeatedly gone stale
+# (missed `hooks/`, causing every PreToolUse hook wired in settings.json to
+# fail with "no such file" inside the worktree) — copy everything so the
+# worktree has full parity with the source repo's Claude Code config.
+# ralph-fork/ is excluded here and repopulated by the dedicated block below
+# (which carefully excludes .archive/ and avoids nesting stale loop state).
 if [[ -d ".claude" ]]; then
   mkdir -p "$WORKTREE_ABS/.claude"
-  for item in skills commands settings.json settings.local.json; do
-    if [[ -e ".claude/$item" ]]; then
-      cp -R ".claude/$item" "$WORKTREE_ABS/.claude/" >&2
-    fi
-  done
+  cp -R ".claude/." "$WORKTREE_ABS/.claude/" >&2
+  rm -rf "$WORKTREE_ABS/.claude/ralph-fork"
+fi
+
+# Full _project/ copy (agent context: rules, specs, progress, project-rules).
+# Always copied, not gated behind --copy-paths — a worktree without it can't
+# resolve _project/rules/ references from CLAUDE.md or run rule-gated hooks.
+if [[ -d "_project" ]]; then
+  mkdir -p "$WORKTREE_ABS/_project"
+  cp -R "_project/." "$WORKTREE_ABS/_project/" >&2
 fi
 
 # Copy .claude/ralph-fork/ EXCLUDING .archive/ (avoids dragging archived

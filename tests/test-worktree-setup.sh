@@ -44,25 +44,27 @@ git config user.email t@t.local
 git config user.name t
 
 echo "# Project rules" > CLAUDE.md
-mkdir -p .claude/skills/foo .claude/commands
+mkdir -p .claude/skills/foo .claude/commands .claude/hooks/pre-tool-use
 echo "foo skill" > .claude/skills/foo/SKILL.md
 echo "cmd" > .claude/commands/test.md
 echo '{"x":1}' > .claude/settings.json
 echo '{"y":2}' > .claude/settings.local.json
+echo "print('hook')" > .claude/hooks/pre-tool-use/example-guard.py
 # Ralph-fork dir with one OTHER loop already running, plus .archive that must NOT be copied.
 mkdir -p .claude/ralph-fork/other-loop .claude/ralph-fork/.archive/archived-loop
 echo '{"loop_id":"other-loop"}' > .claude/ralph-fork/other-loop/state.json
 echo "archived" > .claude/ralph-fork/.archive/archived-loop/state.json
-mkdir -p _project/progress/in-progress
+mkdir -p _project/progress/in-progress _project/rules/some-rule
 cat > _project/progress/in-progress/checklist.md <<'EOF'
 # Checklist
 - [ ] Task 1
 EOF
+echo "# Some rule" > _project/rules/some-rule/some-rule.md
 echo "EXAMPLE_KEY=v" > .env
 echo "LOCAL=1" > .env.local
 mkdir -p extras
 echo "extra" > extras/note.md
-git add CLAUDE.md .claude _project/progress _project/progress/in-progress/checklist.md
+git add CLAUDE.md .claude _project/progress _project/rules _project/progress/in-progress/checklist.md
 git add -f _project/progress/in-progress/checklist.md 2>/dev/null
 git commit -qm "fixture"
 
@@ -117,6 +119,17 @@ else
 fi
 
 [[ -f "$ABS/_project/progress/in-progress/checklist.md" ]] && pass "Checklist dir copied" || fail "Checklist dir not copied" ""
+
+# Regression: hooks/ was previously missing from the curated .claude/ copy,
+# causing every PreToolUse/PostToolUse hook in settings.json to fail with
+# "no such file" inside every worktree loop.
+[[ -f "$ABS/.claude/hooks/pre-tool-use/example-guard.py" ]] && pass ".claude/hooks copied" || fail ".claude/hooks missing" ""
+
+# Regression: _project/ (beyond just the checklist dir) was previously only
+# copied via --copy-paths, so CLAUDE.md's _project/rules/ references and any
+# rule-gated hook broke inside worktrees unless the caller remembered to pass
+# --copy-paths "_project". It must be copied by default, unconditionally.
+[[ -f "$ABS/_project/rules/some-rule/some-rule.md" ]] && pass "_project/ copied by default (not just via --copy-paths)" || fail "_project/rules missing" ""
 [[ -f "$ABS/.env" ]] && pass ".env copied" || fail ".env missing" ""
 [[ -f "$ABS/.env.local" ]] && pass ".env.local copied" || fail ".env.local missing" ""
 
