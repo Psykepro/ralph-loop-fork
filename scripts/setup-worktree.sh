@@ -92,24 +92,44 @@ if [[ -f "CLAUDE.md" ]]; then
   cp "CLAUDE.md" "$WORKTREE_ABS/" >&2
 fi
 
-# Full .claude/ copy. A curated allowlist here has repeatedly gone stale
-# (missed `hooks/`, causing every PreToolUse hook wired in settings.json to
-# fail with "no such file" inside the worktree) — copy everything so the
-# worktree has full parity with the source repo's Claude Code config.
-# ralph-fork/ is excluded here and repopulated by the dedicated block below
-# (which carefully excludes .archive/ and avoids nesting stale loop state).
+# .claude/ untracked-file overlay. `git worktree add` above already checked
+# out the clean, committed .claude/ tree from BASE_REF — that's the correct,
+# safe baseline (2026-08-31: a raw `cp -R ".claude/." dst` here used to also
+# drag along OTHER sessions' uncommitted, in-flight edits to already-tracked
+# files — e.g. a mid-edit hook script — into every new worktree, which then
+# surfaced as spurious diffs/merge conflicts when that worktree's branch was
+# later merged back. Copy every genuinely NEW, not-yet-committed file
+# (git's own untracked-file list, deliberately WITHOUT --exclude-standard —
+# a machine-global gitignore commonly excludes `.claude/settings.local.json`,
+# and that file must still travel with the worktree since it's real local
+# config, not someone else's WIP) so a locally-added-but-uncommitted
+# skill/hook/local-setting still makes it in, without also carrying unrelated
+# dirty edits to existing TRACKED files (those are what actually caused the
+# leak — an untracked file was never anyone's silently-abandoned mid-edit,
+# it has no prior committed state to diverge from). A prior curated-allowlist
+# approach here had gone stale in the other direction (missed `hooks/`,
+# breaking every PreToolUse hook in a worktree) — this fixes both failure
+# modes at once, since `git ls-files --others` is git's own live-derived
+# list, never a hand-maintained one that can go stale.
 if [[ -d ".claude" ]]; then
   mkdir -p "$WORKTREE_ABS/.claude"
-  cp -R ".claude/." "$WORKTREE_ABS/.claude/" >&2
+  git ls-files --others -- .claude | while IFS= read -r f; do
+    mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
+    cp "$f" "$WORKTREE_ABS/$f"
+  done
   rm -rf "$WORKTREE_ABS/.claude/ralph-fork"
 fi
 
-# Full _project/ copy (agent context: rules, specs, progress, project-rules).
-# Always copied, not gated behind --copy-paths — a worktree without it can't
-# resolve _project/rules/ references from CLAUDE.md or run rule-gated hooks.
+# _project/ untracked-file overlay — same fix, same reasoning as .claude/
+# above. Always applied, not gated behind --copy-paths — a worktree without
+# it can't resolve _project/rules/ references from CLAUDE.md or run
+# rule-gated hooks.
 if [[ -d "_project" ]]; then
   mkdir -p "$WORKTREE_ABS/_project"
-  cp -R "_project/." "$WORKTREE_ABS/_project/" >&2
+  git ls-files --others -- _project | while IFS= read -r f; do
+    mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
+    cp "$f" "$WORKTREE_ABS/$f"
+  done
 fi
 
 # Copy .claude/ralph-fork/ EXCLUDING .archive/ (avoids dragging archived
@@ -135,15 +155,21 @@ if [[ -d "$WORKTREE_ABS/.claude/ralph-fork/$LOOP_ID" ]]; then
   rm -rf "$WORKTREE_ABS/.claude/ralph-fork/$LOOP_ID"
 fi
 
-# Checklist directory (copy whole dir so sibling files referenced by the
-# checklist — e.g. spec docs — come along).
+# Checklist directory — untracked-file overlay, same fix/reasoning as
+# .claude/ and _project/ above: `git worktree add` already brought the
+# clean committed tree, so only genuinely new (untracked) files need a
+# manual copy; a tracked-but-locally-modified file is left at its clean
+# committed version rather than inheriting a dirty edit from elsewhere.
 # Skip when CHECKLIST_DIR is "." (root-level checklist): copying `./.` would
 # pull the whole working tree, including .git/, into the worktree and
 # clobber its gitdir pointer. Users with root-level checklists rely on
 # `git worktree add` to bring tracked files along, or use --copy-paths.
 if [[ -n "$CHECKLIST_DIR" ]] && [[ "$CHECKLIST_DIR" != "." ]] && [[ -d "$CHECKLIST_DIR" ]]; then
   mkdir -p "$WORKTREE_ABS/$CHECKLIST_DIR"
-  cp -R "$CHECKLIST_DIR/." "$WORKTREE_ABS/$CHECKLIST_DIR/" >&2
+  git ls-files --others -- "$CHECKLIST_DIR" | while IFS= read -r f; do
+    mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
+    cp "$f" "$WORKTREE_ABS/$f"
+  done
 fi
 
 # .env files at repo root (any name starting with .env). One glob, no overlap.
@@ -156,9 +182,12 @@ done
 shopt -u nullglob
 
 # Extra user-supplied copy paths. Each is copied into the matching relative
-# path under the worktree. Files and dirs are handled differently because
-# `cp -R src dst` nests on macOS when dst already exists (which happens when
-# the path is a tracked file/dir — git worktree add brought it in already).
+# path under the worktree — untracked files only, same fix/reasoning as
+# .claude/_project/CHECKLIST_DIR above (a tracked file already arrived via
+# `git worktree add`'s clean BASE_REF checkout; only genuinely new content
+# needs a manual copy here). A single explicitly-named file is copied
+# unconditionally only when it isn't tracked at all (the common case for
+# --copy-paths targets like .secret/.env, which are gitignored by design).
 for src in "$@"; do
   [[ -z "$src" ]] && continue
   if [[ ! -e "$src" ]]; then
@@ -168,11 +197,15 @@ for src in "$@"; do
   dest="$WORKTREE_ABS/$src"
   if [[ -d "$src" ]]; then
     mkdir -p "$dest"
-    # Copy contents of src into dest. Works whether dest existed or not.
-    cp -R "$src/." "$dest/" >&2
+    git ls-files --others -- "$src" | while IFS= read -r f; do
+      mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
+      cp "$f" "$WORKTREE_ABS/$f"
+    done
   else
-    mkdir -p "$(dirname "$dest")"
-    cp "$src" "$dest" >&2
+    if [[ -z "$(git ls-files -- "$src")" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      cp "$src" "$dest" >&2
+    fi
   fi
 done
 

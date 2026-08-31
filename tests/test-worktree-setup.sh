@@ -294,6 +294,58 @@ else
   fail "New branch incorrectly forked from the invoking cwd's ambient HEAD (the bug this flag fixes)" ""
 fi
 
+echo -e "${YELLOW}Test 5: an uncommitted dirty edit to an already-tracked file does NOT leak into a new worktree${NC}"
+
+# Regression test for the 2026-08-31 finding: a raw `cp -R` of the working
+# tree used to drag along ANOTHER session's in-flight, uncommitted edit to an
+# already-tracked file (e.g. a hook script). Fixed by copying only genuinely
+# untracked files; already-tracked content comes from `git worktree add`'s
+# own clean checkout of BASE_REF.
+REPO5=$(mktemp -d -t wt-setup-test5-XXXX)
+cd "$REPO5"
+git init -q -b main
+git config user.email t@t.local
+git config user.name t
+mkdir -p .claude/hooks/pre-tool-use
+echo "clean-committed-version" > .claude/hooks/pre-tool-use/some-guard.py
+git add .claude
+git commit -qm "fixture: tracked hook script"
+MAIN_HEAD5=$(git rev-parse HEAD)
+
+# Simulate a concurrent session's in-flight, uncommitted edit to the tracked file.
+echo "DIRTY-UNCOMMITTED-WIP-EDIT-FROM-ANOTHER-SESSION" > .claude/hooks/pre-tool-use/some-guard.py
+
+# Also add a genuinely new, untracked file — this SHOULD still travel, since
+# it has no prior committed state to diverge from.
+echo "new-untracked-content" > .claude/hooks/pre-tool-use/new-guard.py
+
+ABS5=$(bash "$SETUP_WT" "loop5" ".worktrees/loop5" "ralph/loop5" "$MAIN_HEAD5" "_project/progress/in-progress" 2>/dev/null)
+
+COPIED_CONTENT=$(cat "$ABS5/.claude/hooks/pre-tool-use/some-guard.py" 2>/dev/null)
+if [[ "$COPIED_CONTENT" == "clean-committed-version" ]]; then
+  pass "Dirty uncommitted edit to a tracked file did NOT leak into the worktree"
+else
+  fail "Dirty edit leaked into the worktree (the exact 2026-08-31 bug)" "got: $COPIED_CONTENT"
+fi
+
+if [[ -f "$ABS5/.claude/hooks/pre-tool-use/new-guard.py" ]]; then
+  pass "Genuinely new untracked file still copied through"
+else
+  fail "New untracked file missing — overcorrected the fix" ""
+fi
+
+# Confirm the source repo's own working tree is untouched by the copy (we
+# read the dirty file, never wrote back to it).
+SRC_STILL_DIRTY=$(cat "$REPO5/.claude/hooks/pre-tool-use/some-guard.py")
+if [[ "$SRC_STILL_DIRTY" == "DIRTY-UNCOMMITTED-WIP-EDIT-FROM-ANOTHER-SESSION" ]]; then
+  pass "Source repo's own dirty edit left untouched (not silently discarded)"
+else
+  fail "Source repo's dirty edit was unexpectedly modified" "got: $SRC_STILL_DIRTY"
+fi
+
+git -C "$REPO5" worktree remove --force "$ABS5" 2>/dev/null
+rm -rf "$REPO5"
+
 echo ""
 echo "========================================"
 echo "Test Results"
