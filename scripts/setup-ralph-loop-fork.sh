@@ -724,7 +724,7 @@ if [[ "$RESUME" == "true" ]]; then
   TOTAL_ITERATIONS=$(jq -r '.total_iterations' "$STATE_FILE")
   PRESERVE_FINAL_SESSION=$(jq -r '.preserve_final_session // false' "$STATE_FILE")
   NO_CLEANUP=$(jq -r '.no_cleanup // false' "$STATE_FILE")
-  SESSION_TOKEN=$(jq -r '.session_token // ""' "$STATE_FILE")
+  SESSION_ID=$(jq -r '.session_id // .session_token // ""' "$STATE_FILE")
 
   echo "Resuming Ralph Loop Fork: $LOOP_ID (Session $SESSION_NUMBER)"
   echo ""
@@ -761,7 +761,7 @@ else
 
   # Generate unique session token for stop hook identification
   # This prevents false matches when other sessions read ralph-related files
-  SESSION_TOKEN=$(uuidgen 2>/dev/null | tr -d '-' | head -c 16 || head -c 16 /dev/urandom | xxd -p | head -c 16)
+  SESSION_ID=$(uuidgen 2>/dev/null | tr -d '-' | head -c 16 || head -c 16 /dev/urandom | xxd -p | head -c 16)
 
   # Create global state file (persists across sessions)
   COMPLETION_PROMISE_JSON="null"
@@ -814,7 +814,7 @@ else
   "max_per_session": $MAX_PER_SESSION,
   "total_iterations": 0,
   "session_number": 1,
-  "session_token": "$SESSION_TOKEN",
+  "session_id": "$SESSION_ID",
   "completion_promise": $COMPLETION_PROMISE_JSON,
   "prompt": $(echo "$PROMPT" | jq -Rs .),
   "preserve_final_session": $PRESERVE_FINAL_SESSION,
@@ -895,7 +895,7 @@ if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
   FULL_PROMPT="$PROMPT
 
 ---
-RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
+RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is session 1. Work through the checklist until complete.
 - When ALL work is COMPLETE, output: <promise>$COMPLETION_PROMISE</promise>
 - Only output the promise when the statement is completely TRUE.
@@ -933,7 +933,7 @@ else
   FULL_PROMPT="$PROMPT
 
 ---
-RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
+RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is session 1. Work through the checklist until complete.
 
 PARALLEL SUB-AGENTS:
@@ -970,7 +970,7 @@ cat > "$LOCAL_FILE" <<EOF
 loop_id: $LOOP_ID
 active: true
 session_number: $SESSION_NUMBER
-session_token: $SESSION_TOKEN
+session_id: $SESSION_ID
 iteration: 1
 max_per_session: $MAX_PER_SESSION
 completion_promise: $COMPLETION_PROMISE_YAML

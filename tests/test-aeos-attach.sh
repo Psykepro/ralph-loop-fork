@@ -1409,6 +1409,86 @@ else
     "got: $(state_field "$T22B" "doom-t22b" "stuck_count")"
 fi
 
+# ── session_token -> session_id rename: back-compat coverage ─────────────────
+# extract_loop_from_transcript() (stop-hook-fork.sh) verifies the transcript's
+# embedded Token against state.json via `.session_id // .session_token // ""`.
+# A mismatch logs "Token mismatch!" to debug_log (not stdout), so these tests
+# point RALPH_FORK_LOG_DIR at a disposable dir and grep the day's log file —
+# the only observable signal for this branch (no existing test covers it).
+
+run_stop_hook_with_log() {
+  local dir="$1" loop_id="$2"
+  local log_dir; log_dir=$(mktemp -d -t aeos-tokenlog-XXXX); _CLEANUP_DIRS+=("$log_dir")
+  local transcript="$dir/transcripts/$loop_id.jsonl"
+  local input_json
+  input_json=$(jq -n --arg transcript "$transcript" '{"stop_hook_active": false, "transcript_path": $transcript}')
+  ( cd "$dir" && echo "$input_json" | RALPH_FORK_LOG_DIR="$log_dir" bash "$STOP_HOOK" >/dev/null 2>&1 || true )
+  cat "$log_dir"/ralph-fork-*.log 2>/dev/null
+}
+
+# New-format fixture: state.json/local.md carry ONLY session_id, no
+# session_token at all — proves a fresh (post-rename) loop verifies cleanly.
+T_NEWFMT=$(mktemp -d -t aeos-newfmt-XXXX); _CLEANUP_DIRS+=("$T_NEWFMT")
+mkdir -p "$T_NEWFMT/.claude/ralph-fork/newfmt-loop" "$T_NEWFMT/transcripts"
+cat > "$T_NEWFMT/.claude/ralph-fork/newfmt-loop/state.json" <<'EOF'
+{
+  "loop_id": "newfmt-loop", "active": true, "total_budget": 5, "max_per_session": 1,
+  "total_iterations": 1, "session_number": 1, "session_id": "deadbeef01",
+  "completion_promise": "DONE", "prompt": "test",
+  "awaiting_checklist_update": false, "awaiting_confirmation": false,
+  "executing_on_completion": false, "awaiting_background_agents": false,
+  "bg_agent_block_count": 0, "spawned_sessions": []
+}
+EOF
+cat > "$T_NEWFMT/transcripts/newfmt-loop.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"RALPH LOOP CONTEXT (Loop: newfmt-loop, Session 1, Token: deadbeef01): test"}}
+EOF
+NEWFMT_LOG=$(run_stop_hook_with_log "$T_NEWFMT" "newfmt-loop")
+if echo "$NEWFMT_LOG" | grep -q "Token verified successfully" && ! echo "$NEWFMT_LOG" | grep -q "Token mismatch"; then
+  pass "session_id rename: new-format state.json (session_id only) verifies cleanly"
+else
+  fail "session_id rename: new-format state.json failed to verify" "log: $NEWFMT_LOG"
+fi
+
+# Mixed-format fixture: BOTH keys present with DIFFERENT values — proves
+# `.session_id // .session_token` precedence (session_id must win; if the
+# stale session_token were used instead, this would report a mismatch).
+T_MIXFMT=$(mktemp -d -t aeos-mixfmt-XXXX); _CLEANUP_DIRS+=("$T_MIXFMT")
+mkdir -p "$T_MIXFMT/.claude/ralph-fork/mixfmt-loop" "$T_MIXFMT/transcripts"
+cat > "$T_MIXFMT/.claude/ralph-fork/mixfmt-loop/state.json" <<'EOF'
+{
+  "loop_id": "mixfmt-loop", "active": true, "total_budget": 5, "max_per_session": 1,
+  "total_iterations": 1, "session_number": 1,
+  "session_id": "cafef00d02", "session_token": "0badc0de99",
+  "completion_promise": "DONE", "prompt": "test",
+  "awaiting_checklist_update": false, "awaiting_confirmation": false,
+  "executing_on_completion": false, "awaiting_background_agents": false,
+  "bg_agent_block_count": 0, "spawned_sessions": []
+}
+EOF
+cat > "$T_MIXFMT/transcripts/mixfmt-loop.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"RALPH LOOP CONTEXT (Loop: mixfmt-loop, Session 1, Token: cafef00d02): test"}}
+EOF
+MIXFMT_LOG=$(run_stop_hook_with_log "$T_MIXFMT" "mixfmt-loop")
+if echo "$MIXFMT_LOG" | grep -q "Token verified successfully" && ! echo "$MIXFMT_LOG" | grep -q "Token mismatch"; then
+  pass "session_id rename: mixed-format state.json — session_id takes precedence over stale session_token"
+else
+  fail "session_id rename: session_id did not take precedence over session_token" "log: $MIXFMT_LOG"
+fi
+
+# Old-format control: session_token only (no session_id) — the fallback's
+# OTHER branch. Reuses make_stop_fixture's existing default (still emits
+# "session_token": "abc123", unchanged by this rename) as the regression
+# proof that pre-rename state.json files keep working.
+T_OLDFMT=$(mktemp -d -t aeos-oldfmt-XXXX); _CLEANUP_DIRS+=("$T_OLDFMT")
+make_stop_fixture "$T_OLDFMT" "oldfmt-loop" 1 "" 0 5 1 false
+OLDFMT_LOG=$(run_stop_hook_with_log "$T_OLDFMT" "oldfmt-loop")
+if echo "$OLDFMT_LOG" | grep -q "Token verified successfully" && ! echo "$OLDFMT_LOG" | grep -q "Token mismatch"; then
+  pass "session_id rename: old-format state.json (session_token only) still verifies via fallback"
+else
+  fail "session_id rename: old-format state.json fallback broke" "log: $OLDFMT_LOG"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
