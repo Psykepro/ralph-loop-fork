@@ -114,6 +114,18 @@ fi
 if [[ -d ".claude" ]]; then
   mkdir -p "$WORKTREE_ABS/.claude"
   git ls-files --others -- .claude | while IFS= read -r f; do
+    # 2026-08-31: `git ls-files --others` is a snapshot; on a shared checkout
+    # with other concurrent sessions actively creating/deleting untracked
+    # files (e.g. a skill-creator run mid-write under .claude/skills/), a
+    # listed file can vanish before this loop reaches it. A missing SOURCE
+    # here is an expected concurrent-session race, not a setup failure —
+    # skip and warn rather than letting one vanished file abort the whole
+    # worktree creation (which then rolls back and silently discards every
+    # other file this loop already copied).
+    if [[ ! -e "$f" ]]; then
+      echo "⚠️  skipping .claude overlay file (vanished before copy, likely a concurrent session): $f" >&2
+      continue
+    fi
     mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
     cp "$f" "$WORKTREE_ABS/$f"
   done
@@ -127,6 +139,11 @@ fi
 if [[ -d "_project" ]]; then
   mkdir -p "$WORKTREE_ABS/_project"
   git ls-files --others -- _project | while IFS= read -r f; do
+    # Same concurrent-session race tolerance as the .claude/ overlay above.
+    if [[ ! -e "$f" ]]; then
+      echo "⚠️  skipping _project overlay file (vanished before copy, likely a concurrent session): $f" >&2
+      continue
+    fi
     mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
     cp "$f" "$WORKTREE_ABS/$f"
   done
