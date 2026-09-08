@@ -838,7 +838,8 @@ else
   "bg_agent_block_count": 0,
   "spawned_sessions": [],
   "original_session_name": "$ORIGINAL_SESSION",
-  "worktree_path": null
+  "worktree_path": null,
+  "base_ref": null
 }
 EOF
 
@@ -1048,11 +1049,21 @@ if [[ "$WORKTREE" == "true" ]]; then
   # no-op if another loop's state still lives there).
   rmdir .claude/ralph-fork 2>/dev/null || true
 
-  # Record the absolute worktree path inside the moved state.json so cancel
-  # and resume both see it.
+  # Record the absolute worktree path AND the base ref it was forked from
+  # inside the moved state.json, so cancel/resume see the path and a
+  # base-branch-freshness check (worktree-base-freshness-check.py) can find
+  # out what to compare HEAD against without guessing. Before this field
+  # existed, nothing recorded which ref/branch a worktree forked from, so a
+  # base branch that kept moving on origin after the fork (or was already
+  # diverged from origin at fork time) was invisible until a loop's own work
+  # collided with it mid-implementation (2026-08-31 ucl-blockstamp incident:
+  # a Phase 3 checklist item referenced code that only existed on origin/main,
+  # 6 commits ahead of the worktree's base, with no signal anywhere that the
+  # base had drifted).
   MOVED_STATE_FILE="$WORKTREE_PATH_ABS/.claude/ralph-fork/$LOOP_ID/state.json"
   TMP_STATE="${MOVED_STATE_FILE}.tmp"
-  jq --arg wp "$WORKTREE_PATH_ABS" '.worktree_path = $wp' \
+  jq --arg wp "$WORKTREE_PATH_ABS" --arg br "$BASE_REF" \
+    '.worktree_path = $wp | .base_ref = $br' \
     "$MOVED_STATE_FILE" > "$TMP_STATE"
   mv "$TMP_STATE" "$MOVED_STATE_FILE"
 

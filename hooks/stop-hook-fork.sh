@@ -2237,7 +2237,7 @@ REQUIRED BEFORE RE-OUTPUTTING THE PROMISE
      git add <path/to/checklist>
 
 2. Commit:
-     git commit -m "chore: tick checklist items — <brief description>"
+     git commit -m \"chore: tick checklist items — <brief description>\"
 
 3. Re-output the promise:
      <promise>$COMPLETION_PROMISE</promise>$(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; then echo "
