@@ -103,11 +103,11 @@ if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECK
   CHECKLIST_PATH="$PROJECT_ROOT/$CHECKLIST_PATH"
 fi
 
-NEW_SESSION_TOKEN=$(uuidgen 2>/dev/null | tr -d '-' | head -c 16 || head -c 16 /dev/urandom | xxd -p | head -c 16)
-jq ".session_token = \"$NEW_SESSION_TOKEN\"" "$STATE_FILE" > "${STATE_FILE}.tmp"
+NEW_SESSION_ID=$(uuidgen 2>/dev/null | tr -d '-' | head -c 16 || head -c 16 /dev/urandom | xxd -p | head -c 16)
+jq ".session_id = \"$NEW_SESSION_ID\" | del(.session_token)" "$STATE_FILE" > "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
-SESSION_TOKEN="$NEW_SESSION_TOKEN"
-echo "Generated new session token: $SESSION_TOKEN (old sessions will be invalidated)"
+SESSION_ID="$NEW_SESSION_ID"
+echo "Generated new session token: $SESSION_ID (old sessions will be invalidated)"
 
 if [[ -n "$COMMAND" ]] && [[ "$COMMAND" != "null" ]]; then
   PROMPT="$COMMAND @$CHECKLIST_PATH"
@@ -128,7 +128,7 @@ cat > "$LOCAL_FILE" <<EOF
 loop_id: $LOOP_ID
 active: true
 session_number: $SESSION_NUMBER
-session_token: $SESSION_TOKEN
+session_id: $SESSION_ID
 iteration: 1
 max_per_session: $MAX_PER_SESSION
 completion_promise: $COMPLETION_PROMISE_YAML
@@ -153,7 +153,7 @@ if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
   FULL_PROMPT="$STUCK_BANNER$PROMPT
 
 ---
-RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
+RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is a continuation session. Work through the checklist until complete.
 - When ALL work is COMPLETE, output: <promise>$COMPLETION_PROMISE</promise>
 - Only output the promise when the statement is completely TRUE.
@@ -183,7 +183,7 @@ else
   FULL_PROMPT="$STUCK_BANNER$PROMPT
 
 ---
-RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_TOKEN):
+RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is a continuation session. Work through the checklist until complete.
 
 PARALLEL SUB-AGENTS:

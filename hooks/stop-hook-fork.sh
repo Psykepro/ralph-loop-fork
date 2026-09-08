@@ -922,10 +922,10 @@ extract_loop_from_transcript() {
 
   if [[ -n "$full_marker" ]]; then
     local loop_id=$(echo "$full_marker" | sed -n 's/.*Loop: \([^,]*\),.*/\1/p')
-    local session_token=$(echo "$full_marker" | sed -n 's/.*Token: \([a-fA-F0-9]*\).*/\1/p')
+    local session_id=$(echo "$full_marker" | sed -n 's/.*Token: \([a-fA-F0-9]*\).*/\1/p')
 
     debug_log "Extracted loop ID from transcript: $loop_id"
-    debug_log "Extracted token from transcript: $session_token"
+    debug_log "Extracted token from transcript: $session_id"
 
     # Find state file by traversing up from PWD (handles cd into subdirectories)
     local state_file=""
@@ -939,9 +939,9 @@ extract_loop_from_transcript() {
     done
 
     if [[ -n "$state_file" ]]; then
-      local expected_token=$(jq -r '.session_token // ""' "$state_file" 2>/dev/null)
-      if [[ -n "$expected_token" ]] && [[ "$session_token" != "$expected_token" ]]; then
-        debug_log "Token mismatch! Transcript: $session_token, Expected: $expected_token"
+      local expected_token=$(jq -r '.session_id // .session_token // ""' "$state_file" 2>/dev/null)
+      if [[ -n "$expected_token" ]] && [[ "$session_id" != "$expected_token" ]]; then
+        debug_log "Token mismatch! Transcript: $session_id, Expected: $expected_token"
         debug_log "This is likely a false match from reading ralph files - ignoring"
         return 1
       fi
