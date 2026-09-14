@@ -142,6 +142,45 @@ create_transcript() {
 EOF
 }
 
+# Create a mock .aeos-config.json declaring an external delegated-work lock
+# path + wait budget, for the awaiting_minion gate tests below.
+create_aeos_config_with_minion_lock() {
+  local loop_id="$1"
+  local lock_path="$2"
+  local unresponsive_minutes="${3:-15}"
+
+  local config_file="$TEST_DIR/.claude/ralph-fork/$loop_id/.aeos-config.json"
+
+  cat > "$config_file" <<EOF
+{
+  "schema_version": 1,
+  "minion_lock_path": "$lock_path",
+  "minion_unresponsive_minutes": $unresponsive_minutes
+}
+EOF
+}
+
+# Create a mock external-delegated-work lock file with a created_at timestamp
+# a given number of minutes in the past (0 = "just now").
+create_minion_lock() {
+  local lock_path="$1"
+  local minutes_ago="${2:-0}"
+
+  local created_at
+  if [[ "$minutes_ago" -gt 0 ]]; then
+    created_at=$(date -u -v-"${minutes_ago}"M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "${minutes_ago} minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+  else
+    created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  fi
+
+  cat > "$lock_path" <<EOF
+{
+  "created_at": "$created_at"
+}
+EOF
+}
+
 # Create a mock checklist file
 create_checklist() {
   local checklist_file="$1"
@@ -854,6 +893,106 @@ test_spawn_site_clears_orphan_flags() {
   echo ""
 }
 
+# -----------------------------------------------------------------------------
+# Test J: all boxes checked + external delegated-work lock present, elapsed <
+#         wait budget → BLOCK (awaiting_minion=true), loop NOT terminated
+# -----------------------------------------------------------------------------
+test_minion_lock_blocks_within_budget() {
+  echo -e "${YELLOW}Test J: lock present, elapsed < wait budget → BLOCK, not terminated${NC}"
+
+  local loop_id="test-minion-block"
+  local transcript_file=$(setup_test_env "$loop_id" "minion_block_test")
+  local checklist_file="$TEST_DIR/checklist-minion-block.md"
+  local lock_file="$TEST_DIR/minion-block.lock"
+
+  create_checklist "$checklist_file" 0 3  # 0 unchecked, 3 checked
+  create_state_file "$loop_id" 100 1 false true false "/reflect-learn" "$checklist_file"
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "<confirmed>YES</confirmed>"
+  create_aeos_config_with_minion_lock "$loop_id" "$lock_file" 15
+  create_minion_lock "$lock_file" 1  # 1 minute ago, well under the 15m budget
+
+  # Use stop_hook_active=true: AWAITING_CONFIRMATION is processed in the continuation cycle.
+  local output=$(run_hook "$transcript_file" true)
+
+  assert_contains '"decision":"block"' "$(echo "$output" | tr -d ' \n')" "Hook BLOCKs while external delegated work lock is held"
+  assert_contains "still in progress" "$output" "Output explains the wait, not asking the model to hold its turn"
+  assert_state_flag "$loop_id" "awaiting_minion" "true" "awaiting_minion flag set"
+  assert_state_flag "$loop_id" "active" "true" "Loop NOT terminated while lock is held"
+  assert_state_flag "$loop_id" "awaiting_confirmation" "false" "awaiting_confirmation cleared on entry to awaiting_minion"
+  assert_state_flag "$loop_id" "total_iterations" "1" "total_iterations NOT incremented by a re-block on the external-work lock (budget not consumed while waiting)"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test K: awaiting_minion=true, lock still present but elapsed >= wait budget
+#         → terminate (termination_reason=minion_unresponsive), BLOCKER.md written
+# -----------------------------------------------------------------------------
+test_minion_lock_unresponsive_terminates() {
+  echo -e "${YELLOW}Test K: lock present, elapsed >= wait budget → terminate + BLOCKER.md${NC}"
+
+  local loop_id="test-minion-unresponsive"
+  local transcript_file=$(setup_test_env "$loop_id" "minion_unresponsive_test")
+  local lock_file="$TEST_DIR/minion-unresponsive.lock"
+
+  create_state_file "$loop_id" 100 1 false false false "/reflect-learn"
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "still waiting"
+  create_aeos_config_with_minion_lock "$loop_id" "$lock_file" 15
+  create_minion_lock "$lock_file" 30  # 30 minutes ago, over the 15m budget
+
+  # Manually set awaiting_minion=true (as if a prior fire already entered the gate).
+  local state_file="$TEST_DIR/.claude/ralph-fork/$loop_id/state.json"
+  jq '.awaiting_minion = true' "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+
+  # stop_hook_active=true: continuation cycle re-checks the lock directly.
+  local output=$(run_hook "$transcript_file" true)
+
+  assert_contains "unresponsive" "$output" "Output mentions unresponsive external delegated work"
+  assert_state_flag "$loop_id" "active" "false" "Loop terminated"
+  assert_state_flag "$loop_id" "termination_reason" "minion_unresponsive" "termination_reason=minion_unresponsive"
+  assert_state_flag "$loop_id" "awaiting_minion" "false" "awaiting_minion cleared on termination"
+
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ -f "$TEST_DIR/BLOCKER.md" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}PASS${NC}: BLOCKER.md written"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}FAIL${NC}: BLOCKER.md written"
+  fi
+  rm -f "$TEST_DIR/BLOCKER.md"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test L: all boxes checked, no external delegated-work lock configured →
+#         falls through to existing on-completion behavior, unmodified
+# -----------------------------------------------------------------------------
+test_minion_lock_absent_falls_through_unchanged() {
+  echo -e "${YELLOW}Test L: no lock configured → existing on-completion behavior unchanged${NC}"
+
+  local loop_id="test-minion-absent"
+  local transcript_file=$(setup_test_env "$loop_id" "minion_absent_test")
+  local checklist_file="$TEST_DIR/checklist-minion-absent.md"
+
+  create_checklist "$checklist_file" 0 3  # 0 unchecked, 3 checked
+  create_state_file "$loop_id" 100 1 false true false "/reflect-learn" "$checklist_file"
+  create_local_file "$loop_id" 1
+  create_transcript "$transcript_file" "$loop_id" "<confirmed>YES</confirmed>"
+  # No .aeos-config.json at all - standalone mode, matches Test 3 exactly.
+
+  local output=$(run_hook "$transcript_file" true)
+
+  assert_contains "Confirmation verified" "$output" "Confirmation verified message (unchanged)"
+  assert_state_flag "$loop_id" "executing_on_completion" "true" "executing_on_completion flag set (unchanged)"
+  assert_state_flag "$loop_id" "awaiting_minion" "false" "awaiting_minion never set when no lock is configured"
+
+  echo ""
+}
+
 # ============================================================================
 # RUN ALL TESTS
 # ============================================================================
@@ -878,6 +1017,9 @@ test_all_stuck_cancels_awaiting_confirmation
 test_all_stuck_skips_non_stuck
 test_malformed_message_spawn_site
 test_spawn_site_clears_orphan_flags
+test_minion_lock_blocks_within_budget
+test_minion_lock_unresponsive_terminates
+test_minion_lock_absent_falls_through_unchanged
 
 # ============================================================================
 # SUMMARY
