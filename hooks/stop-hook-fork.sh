@@ -12,14 +12,22 @@
 # - AWAITING_CONFIRMATION: LLM confirmed, verify boxes, trigger on-completion or spawn
 # - EXECUTING_ON_COMPLETION: On-completion was sent, cleanup and exit
 # - COMPLETED / BUDGET_EXHAUSTED: Terminal states
+# - (also) awaiting_minion: confirmed + boxes checked, but held before
+#   on-completion because a lock file tracking still-busy external delegated
+#   work (see check_minion_gate) is present. Clears and resumes automatically
+#   once the lock goes away, or terminates if it outlives its wait budget.
 #
 # TRANSITIONS:
 # RUNNING + no promise → AWAITING_CHECKLIST_UPDATE (BLOCK: update checklist)
 # RUNNING + promise → AWAITING_CONFIRMATION (BLOCK: confirm 100%)
 # AWAITING_CHECKLIST_UPDATE + next hook → spawn + RUNNING
-# AWAITING_CONFIRMATION + confirmed + boxes ok → EXECUTING_ON_COMPLETION (BLOCK: slash cmd)
+# AWAITING_CONFIRMATION + confirmed + boxes ok + no external lock → EXECUTING_ON_COMPLETION (BLOCK: slash cmd)
+# AWAITING_CONFIRMATION + confirmed + boxes ok + external lock held → awaiting_minion (BLOCK: waiting)
 # AWAITING_CONFIRMATION + confirmed + boxes bad → spawn + RUNNING
 # AWAITING_CONFIRMATION + no confirmed → spawn + RUNNING
+# awaiting_minion + lock still held + within budget → awaiting_minion (BLOCK: waiting)
+# awaiting_minion + lock cleared → EXECUTING_ON_COMPLETION or COMPLETED
+# awaiting_minion + wait budget exhausted → COMPLETED (termination_reason=minion_unresponsive)
 # EXECUTING_ON_COMPLETION + next hook → COMPLETED (cleanup + exit)
 # any + budget exhausted → BUDGET_EXHAUSTED (cleanup + exit)
 
@@ -1308,6 +1316,10 @@ AWAITING_CONFIRMATION=$(jq -r '.awaiting_confirmation // false' "$STATE_FILE" 2>
 EXECUTING_ON_COMPLETION=$(jq -r '.executing_on_completion // false' "$STATE_FILE" 2>/dev/null) || EXECUTING_ON_COMPLETION="false"
 AWAITING_BACKGROUND_AGENTS=$(jq -r '.awaiting_background_agents // false' "$STATE_FILE" 2>/dev/null) || AWAITING_BACKGROUND_AGENTS="false"
 BG_AGENT_BLOCK_COUNT=$(jq -r '.bg_agent_block_count // 0' "$STATE_FILE" 2>/dev/null) || BG_AGENT_BLOCK_COUNT=0
+# awaiting_minion: confirmed + boxes checked, but held before on-completion
+# because an external delegated-work lock (see check_minion_gate below) is
+# still present. Mirrors the awaiting_<noun> naming convention.
+AWAITING_MINION=$(jq -r '.awaiting_minion // false' "$STATE_FILE" 2>/dev/null) || AWAITING_MINION="false"
 
 # Parse local state
 FRONTMATTER=$(awk '/^---$/{i++; next} i==1' "$LOCAL_FILE") || true
@@ -1317,7 +1329,128 @@ SESSION_NUMBER=$(echo "$FRONTMATTER" | grep '^session_number:' | sed 's/session_
 COMPLETION_PROMISE=$(echo "$FRONTMATTER" | grep '^completion_promise:' | sed 's/completion_promise: *//' | sed 's/^"\(.*\)"$/\1/' || echo "")
 
 debug_log "State: budget=$TOTAL_BUDGET, iterations=$TOTAL_ITERATIONS, session=$SESSION_NUMBER"
-debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION, awaiting_background_agents=$AWAITING_BACKGROUND_AGENTS, bg_agent_block_count=$BG_AGENT_BLOCK_COUNT"
+debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION, awaiting_background_agents=$AWAITING_BACKGROUND_AGENTS, bg_agent_block_count=$BG_AGENT_BLOCK_COUNT, awaiting_minion=$AWAITING_MINION"
+
+# ============================================================================
+# EXTERNAL DELEGATED WORK GATE (awaiting_minion)
+# Re-checks a lock file tracking a still-busy external async worker. This is
+# a plain file/timestamp read, not a transcript parse, so it's safe to run
+# from BOTH the stale-state detector (stop_hook_active=false) and the
+# continuation cycle (stop_hook_active=true) below — always re-verifies the
+# lock directly rather than trusting stale in-memory state. Always exits the
+# hook (block again / terminate / resume the deferred on-completion
+# dispatch) — never returns to its caller.
+#
+# Config (read from .aeos-config.json, fail-open on any parse error):
+#   minion_lock_path            - absolute path to the lock file
+#   minion_unresponsive_minutes - wall-clock minutes the lock may exist
+#                                 before the loop gives up (default 15)
+# Lock file shape (when present): {"created_at": "<ISO-8601 UTC>", ...}
+# ============================================================================
+check_minion_gate() {
+  local aeos_config="$LOOP_DIR/.aeos-config.json"
+  local lock_path="" unresponsive_min=15
+
+  if [[ -f "$aeos_config" ]]; then
+    lock_path=$(jq -r '.minion_lock_path // ""' "$aeos_config" 2>/dev/null) || lock_path=""
+    unresponsive_min=$(jq -r '.minion_unresponsive_minutes // 15' "$aeos_config" 2>/dev/null) || unresponsive_min=15
+    [[ "$unresponsive_min" =~ ^[0-9]+$ ]] || unresponsive_min=15
+  fi
+
+  if [[ -n "$lock_path" ]] && [[ -f "$lock_path" ]]; then
+    local created_at created_epoch now_epoch elapsed_min
+    created_at=$(jq -r '.created_at // ""' "$lock_path" 2>/dev/null) || created_at=""
+    created_epoch=$(printf '%s' "$created_at" | jq -R 'try fromdateiso8601 catch empty' 2>/dev/null)
+
+    if [[ "$created_epoch" =~ ^[0-9]+$ ]]; then
+      now_epoch=$(date -u +%s)
+      elapsed_min=$(( (now_epoch - created_epoch) / 60 ))
+
+      if [[ "$elapsed_min" -ge "$unresponsive_min" ]]; then
+        # Budget exhausted - terminate. Same mechanics as the doom-loop /
+        # revision-budget AEOS terminations above: BLOCKER.md, .active=false,
+        # termination_reason set, ralph-doomed signal, detached cleanup.
+        debug_log "MINION-GATE: lock present ${elapsed_min}m >= budget ${unresponsive_min}m - terminating"
+        info "Ralph Loop Fork [$LOOP_ID]: External delegated work unresponsive (${elapsed_min}m elapsed of ${unresponsive_min}m budget) - terminating loop."
+        info ""
+
+        cat > "$PROJECT_ROOT/BLOCKER.md" <<BLOCKER_EOF
+# BLOCKER
+
+**Condition:** minion-unresponsive
+**Detail:** Lock file $lock_path present for ${elapsed_min}m (budget: ${unresponsive_min}m). Loop ID: $LOOP_ID.
+**Fix:** Check on the external delegated work referenced by the lock file. If it is still legitimately running, raise minion_unresponsive_minutes in .aeos-config.json and remove this file before re-running the loop. If it is stuck or dead, clear the lock file and re-run.
+BLOCKER_EOF
+
+        update_state "$STATE_FILE" ".active = false | .awaiting_minion = false | .termination_reason = \"minion_unresponsive\""
+        emit_signal "ralph-doomed" "$(jq -nc --arg reason "minion_unresponsive" --argjson elapsed "$elapsed_min" --argjson budget "$unresponsive_min" '{reason: $reason, elapsed_minutes: $elapsed, unresponsive_minutes_budget: $budget}')"
+        SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "External delegated work unresponsive after ${elapsed_min}m")
+        jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+
+        run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "false" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+        exit 0
+      fi
+
+      # Still within budget - state the fact and let the next fire re-check.
+      # Do NOT ask the LLM to hold its turn / wait synchronously - a blocked
+      # Stop hook forces another generation in the same turn, it doesn't let
+      # the model literally pause.
+      debug_log "MINION-GATE: lock present, ${elapsed_min}m elapsed of ${unresponsive_min}m budget - blocking again"
+      local prev_count new_count
+      prev_count=$(jq -r '.minion_block_count // 0' "$STATE_FILE" 2>/dev/null) || prev_count=0
+      [[ "$prev_count" =~ ^[0-9]+$ ]] || prev_count=0
+      new_count=$((prev_count + 1))
+      update_state "$STATE_FILE" ".awaiting_minion = true | .minion_block_count = $new_count"
+      info "Ralph Loop Fork [$LOOP_ID]: External delegated work still in progress (${elapsed_min}m elapsed of ${unresponsive_min}m budget)."
+      info ""
+
+      jq -n \
+        --arg loopid "$LOOP_ID" \
+        --argjson elapsed "$elapsed_min" \
+        --argjson budget "$unresponsive_min" \
+        '{
+          "decision": "block",
+          "reason": ("Ralph Loop [\($loopid)]: External delegated work still in progress (\($elapsed)m elapsed of \($budget)m budget) - the loop will proceed automatically once it finishes. No action needed right now."),
+          "systemMessage": ("Ralph [\($loopid)]: waiting on external delegated work (\($elapsed)m/\($budget)m)")
+        }'
+      exit 0
+    fi
+
+    debug_log "MINION-GATE: lock file created_at unparseable ('$created_at') - failing open, resuming completion"
+  fi
+
+  # Lock absent, or present-but-unparseable (fail-open): resume the
+  # on-completion dispatch that was deferred when awaiting_minion was set.
+  # Duplicates the "all boxes checked" dispatch below by design - this
+  # codebase already accepts duplicate terminal dispatch across call sites
+  # (see the defensive EXECUTING_ON_COMPLETION block further down).
+  debug_log "MINION-GATE: lock cleared - resuming on-completion dispatch"
+  info "Ralph Loop Fork [$LOOP_ID]: External delegated work finished - resuming completion."
+  info ""
+
+  move_checklist_to_done "$CHECKLIST_PATH" || debug_log "move_checklist_to_done failed (non-fatal)"
+
+  if [[ -n "$ON_COMPLETION_CMD" ]] && [[ "$ON_COMPLETION_CMD" != "null" ]]; then
+    update_state "$STATE_FILE" ".awaiting_minion = false | .executing_on_completion = true | .on_completion_triggered_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+    jq -n \
+      --arg cmd "$ON_COMPLETION_CMD" \
+      --arg msg "Ralph [$LOOP_ID]: Executing on-completion command" \
+      '{
+        "decision": "block",
+        "reason": $cmd,
+        "systemMessage": $msg
+      }'
+    exit 0
+  fi
+
+  update_state "$STATE_FILE" ".awaiting_minion = false | .active = false | .completed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .termination_reason = \"completed_no_on_completion\""
+  emit_signal "ralph-completed" "$(jq -nc --arg reason "completed_no_on_completion" --argjson sessions "$SESSION_NUMBER" --argjson iterations "$TOTAL_ITERATIONS" '{termination_reason: $reason, total_sessions: $sessions, total_iterations: $iterations}')"
+  SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Loop complete - $SESSION_NUMBER session(s)")
+  jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+  dispatch_worktree_gc "$STATE_FILE"
+  run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "$PRESERVE_FINAL_SESSION" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+  exit 0
+}
 
 # ============================================================================
 # STALE-STATE DETECTOR (stop_hook_active=false only)
@@ -1369,6 +1502,14 @@ if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
     update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
     AWAITING_BACKGROUND_AGENTS="false"
     BG_AGENT_BLOCK_COUNT=0
+  fi
+
+  # Case 5: awaiting_minion stuck — session killed while waiting on external
+  # delegated work. Never just clear it: re-check the lock directly, since
+  # the wait may still be legitimate. check_minion_gate always exits.
+  if [[ "$AWAITING_MINION" == "true" ]]; then
+    debug_log "STALE-STATE: awaiting_minion=true + stop_hook_active=false — re-checking lock"
+    check_minion_gate
   fi
 fi
 
@@ -1472,6 +1613,12 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
       info ""
       # Fall through to normal flow (don't exit)
     fi
+  elif [[ "$AWAITING_MINION" == "true" ]]; then
+    # Re-check the external delegated work lock directly — this does not
+    # depend on transcript content, so it's re-verified every fire rather
+    # than parsed from the LLM's reply. check_minion_gate always exits.
+    debug_log "CONTINUATION: awaiting_minion=true - re-checking lock"
+    check_minion_gate
   else
     if [[ "$USED_WORKTREE_FALLBACK" == "true" ]]; then
       # Worktree mode: we previously BLOCKed to get Claude's status declaration.
@@ -2006,6 +2153,19 @@ if [[ "$AWAITING_CONFIRMATION" == "true" ]]; then
 
         spawn_new_session "$LOOP_ID" "$NEW_SESSION_NUMBER" "$STATE_FILE" "$PLUGIN_ROOT" "$PROJECT_ROOT"
         exit 0
+      fi
+
+      # External delegated work gate: hold before on-completion/COMPLETED
+      # while an external async worker (tracked via a lock file) is still
+      # busy. No-op — falls through unmodified — when no lock is configured
+      # or the lock file isn't present.
+      if [[ -f "$AEOS_CONFIG_FILE" ]]; then
+        MINION_LOCK_PATH_ENTRY=$(jq -r '.minion_lock_path // ""' "$AEOS_CONFIG_FILE" 2>/dev/null) || MINION_LOCK_PATH_ENTRY=""
+        if [[ -n "$MINION_LOCK_PATH_ENTRY" ]] && [[ -f "$MINION_LOCK_PATH_ENTRY" ]]; then
+          debug_log "All boxes checked, but external delegated work lock present — deferring on-completion"
+          update_state "$STATE_FILE" ".awaiting_confirmation = false | .awaiting_minion = true | .minion_block_count = 1"
+          check_minion_gate  # never returns
+        fi
       fi
 
       # All boxes checked - trigger on-completion
