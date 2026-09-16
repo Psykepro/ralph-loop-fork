@@ -48,9 +48,75 @@ fi
 # Helpers
 # ============================================================================
 
+# setup-worktree.sh's untracked-file overlay copies EVERY sibling loop
+# directory under .claude/ralph-fork/ (excluding .archive) into a freshly
+# created worktree, so cross-worktree `--list`/`--all` can see concurrent
+# loops. That snapshot goes stale the instant it's taken for any loop OTHER
+# than the one the worktree was created for — it is never updated again,
+# while the real loop keeps running in its own worktree/the primary
+# checkout. Confirmed live (2026-09-16): a `prc-02` directory copied into
+# `.worktrees/prc-01/.claude/ralph-fork/` during a concurrent launch of
+# prc-01 and prc-02 sat there as a permanently-frozen session-1 snapshot
+# while the real prc-02 loop reached session 4 in its own worktree —
+# `resolve_loop_dir`'s old first-match-wins walk resolved to the stale copy
+# every time `cancel prc-02` ran, silently no-op'ing the cancel (the real
+# loop's state.json was untouched) while reporting success.
+#
+# A stray copy is distinguishable without any new bookkeeping: a loop's
+# OWN state only ever lives in the worktree the tool itself created for it
+# (named after the loop_id by convention) or the primary checkout — never
+# in a DIFFERENT worktree. Once `state.json` has been touched by
+# setup-worktree.sh for its own loop, its `worktree_path` field names that
+# home; a copy sitting anywhere else keeps whatever `worktree_path` it had
+# at snapshot time (often still null, pre-dating the field being set), so
+# checking "does this candidate's own worktree_path (if any) agree with
+# where we found it, or is the loop_id at least the worktree's own name"
+# catches the stale-copy case without depending on timing or session counts.
+#
+# Prints "" (silent) when the candidate is self-consistent, or a non-empty
+# reason string when it should be treated as a stray/foreign snapshot.
+loop_dir_staleness_reason() {
+  local candidate_dir="$1" loop_id="$2" scanned_root="$3"
+  local state_file="$candidate_dir/state.json"
+  local recorded_wt="" scanned_abs="" recorded_abs=""
+
+  # Same-named worktree (or the primary checkout, scanned_root="") is always
+  # the loop's own conventional home — trust it without further checks.
+  if [[ "$(basename "$scanned_root")" == "$loop_id" ]] || [[ -z "$scanned_root" ]]; then
+    return 0
+  fi
+
+  if [[ "$HAS_JQ" != "true" ]] || [[ ! -f "$state_file" ]]; then
+    # Can't verify either way without jq/state.json — found under a
+    # differently-named worktree with no way to confirm it's legitimate;
+    # treat as stale rather than risk operating on the wrong loop silently.
+    printf '%s' "found under worktree '$(basename "$scanned_root")' (expected '$loop_id'), no state.json/jq to verify"
+    return 0
+  fi
+
+  recorded_wt=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null || true)
+  if [[ -z "$recorded_wt" ]]; then
+    printf '%s' "found under worktree '$(basename "$scanned_root")' (expected '$loop_id'), state.json has no worktree_path yet — stale pre-setup snapshot"
+    return 0
+  fi
+
+  scanned_abs=$(cd "$scanned_root" 2>/dev/null && pwd) || scanned_abs="$scanned_root"
+  recorded_abs=$(cd "$recorded_wt" 2>/dev/null && pwd) || recorded_abs="$recorded_wt"
+  if [[ "$scanned_abs" != "$recorded_abs" ]]; then
+    printf '%s' "state.json's own worktree_path ('$recorded_wt') does not match where it was found ('$scanned_root')"
+    return 0
+  fi
+
+  return 0
+}
+
 # Resolve the on-disk directory for a loop_id. Looks in the current repo's
 # .claude/ralph-fork/ first; if not found, walks every git worktree and
-# returns the first match. Prints the resolved path, or empty if not found.
+# returns the first SELF-CONSISTENT match (see loop_dir_staleness_reason) —
+# never a stray same-named snapshot copied into a sibling worktree. Prints
+# the resolved path, or empty if not found. Stray candidates are reported
+# on stderr rather than silently skipped, so a genuinely ambiguous case is
+# visible instead of a silent wrong-directory operation.
 resolve_loop_dir() {
   local loop_id="$1"
 
@@ -61,13 +127,28 @@ resolve_loop_dir() {
 
   # Worktree fallback: --worktree mode moves the state dir into the worktree.
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    local stale_reason="" first_stray=""
     while IFS= read -r wt; do
       [[ -z "$wt" ]] && continue
       if [[ -d "$wt/.claude/ralph-fork/$loop_id" ]]; then
-        printf '%s\n' "$wt/.claude/ralph-fork/$loop_id"
-        return 0
+        stale_reason=$(loop_dir_staleness_reason "$wt/.claude/ralph-fork/$loop_id" "$loop_id" "$wt")
+        if [[ -z "$stale_reason" ]]; then
+          printf '%s\n' "$wt/.claude/ralph-fork/$loop_id"
+          return 0
+        fi
+        echo "Warning: skipping stray '$loop_id' dir at $wt/.claude/ralph-fork/$loop_id — $stale_reason" >&2
+        [[ -z "$first_stray" ]] && first_stray="$wt/.claude/ralph-fork/$loop_id"
       fi
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+
+    # Every match was flagged stray (e.g. jq unavailable everywhere) — fall
+    # back to the first one rather than silently reporting "not found" and
+    # leaving the loop uncancellable.
+    if [[ -n "$first_stray" ]]; then
+      echo "Warning: no self-consistent match for '$loop_id' — using first candidate anyway: $first_stray" >&2
+      printf '%s\n' "$first_stray"
+      return 0
+    fi
   fi
 
   return 0
@@ -100,6 +181,13 @@ enumerate_all_loop_ids() {
         local name
         name=$(basename "$dir")
         [[ "$name" == "$ARCHIVE_DIR_NAME" ]] && continue
+        # Skip stray copies of a sibling loop dragged in by
+        # setup-worktree.sh's untracked-file overlay (see
+        # loop_dir_staleness_reason) — a foreign snapshot should not appear
+        # in --list/--all as if it were a live loop in this worktree.
+        if [[ -n "$(loop_dir_staleness_reason "$dir" "$name" "$wt")" ]]; then
+          continue
+        fi
         out+="$name"$'\n'
       done
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
