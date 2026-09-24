@@ -338,6 +338,8 @@ Every time a session tries to exit, the stop hook fires and decides what to do:
 4. **Session limit** — if this session hasn't reached `max-per-session`, re-feed the prompt in the same session.
 5. **Fork** — otherwise, spawn a new tmux session and rotate the token.
 
+**Background sub-agents.** While sub-agents launched by the session are still pending, the stop hook defers silently: it does not fork, and it does not hold the session open. The session ends its turn, and each task notification re-invokes it. Loop sessions are spawned with `--disallowedTools=ScheduleWakeup`, and the iteration prompt tells them to end the turn instead of polling. Without this, sessions have been observed spending about half their tokens re-scheduling wakeups. For a genuine timed wait on external work, use a single `Bash` command with `run_in_background`.
+
 ### Session tokens and hook isolation
 
 This is the mechanism that makes parallel loops and long multi-session runs
@@ -575,6 +577,7 @@ ralph-loop-fork/
 │   ├── setup-ralph-loop-fork.sh     # Initialisation script
 │   ├── setup-worktree.sh            # Worktree creation + file population
 │   ├── fork-terminal.sh             # tmux fork spawner
+│   ├── lib-session-launch.sh        # Shared launch flags + iteration prompt text
 │   └── cancel-ralph-loop-fork.sh    # Cancel / list script
 ├── commands/
 │   ├── ralph-loop-fork.md           # Main command
