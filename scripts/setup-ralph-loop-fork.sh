@@ -1081,16 +1081,10 @@ if [[ "$WORKTREE" == "true" ]]; then
     INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
     AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
 
-    WS_JSON=$(herdr workspace create --cwd "$WORKTREE_PATH_ABS" --label "$AGENT_NAME" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
-      _err "herdr workspace create failed"
+    herdr_spawn_root_pane "$WORKTREE_PATH_ABS" "$AGENT_NAME" || {
+      _err "herdr pane spawn failed"
       exit 1
     }
-    WS_ID=$(echo "$WS_JSON" | jq -r '.result.workspace.workspace_id')
-    PANE_ID=$(echo "$WS_JSON" | jq -r '.result.root_pane.pane_id')
-    if [[ -z "$WS_ID" ]] || [[ "$WS_ID" == "null" ]] || [[ -z "$PANE_ID" ]] || [[ "$PANE_ID" == "null" ]]; then
-      _err "herdr workspace create did not return workspace_id/pane_id" "Response: $WS_JSON"
-      exit 1
-    fi
 
     # Env sanitation: see fork-terminal-herdr.sh's identical step — the
     # herdr daemon's own environment may carry CLAUDECODE=1 (live-verified

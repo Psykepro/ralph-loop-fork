@@ -76,6 +76,13 @@ case "${1:-} ${2:-}" in
     echo '{"id":"cli:workspace:create","result":{"root_pane":{"pane_id":"wT:p1","workspace_id":"wT"},"workspace":{"workspace_id":"wT","label":"stub"},"type":"workspace_created"}}'
     exit 0
     ;;
+  "workspace get")
+    exit 0
+    ;;
+  "tab create")
+    echo '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"wS:p9","tab_id":"wS:t9","workspace_id":"wS"},"tab":{"tab_id":"wS:t9","workspace_id":"wS","label":"stub"},"type":"tab_created"}}'
+    exit 0
+    ;;
   "pane run")
     # unset command or any other pane run -- no output needed, just record.
     exit 0
@@ -109,6 +116,9 @@ chmod +x "$STUB_DIR/herdr"
 export STUB_HERDR_LOG_PATH="$HERDR_LOG"
 export STUB_BUSY_COUNTER_PATH="$BUSY_COUNTER_FILE"
 export PATH="$STUB_DIR:$PATH"
+
+# Hermetic: the ambient herdr env (running the suite from a herdr pane) must not pick the tab path.
+unset HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
 
 echo -e "${YELLOW}Test 1: fork-terminal-herdr.sh spawns via herdr socket-API calls${NC}"
 
@@ -187,6 +197,29 @@ if [[ "$PANE_ID_RECORDED" == "wT:p1" ]]; then
   pass "spawned_sessions[] recorded pane_id (authoritative teardown target)"
 else
   fail "spawned_sessions[] did not record pane_id" "got: $PANE_ID_RECORDED"
+fi
+
+echo -e "${YELLOW}Test 2: inside a herdr pane, the session spawns as a TAB of the spawner's workspace${NC}"
+
+: > "$HERDR_LOG"
+OUTPUT=$(HERDR_WORKSPACE_ID=wS bash "$FORK_SCRIPT" "$LOOP_ID" 3 "$REPO_DIR" 2>&1)
+RC=$?
+[[ $RC -eq 0 ]] && pass "tab-mode spawn exited 0" || fail "tab-mode spawn exited $RC" "$OUTPUT"
+
+if grep -q "tab create --workspace wS" "$HERDR_LOG"; then
+  pass "tab create targeted the spawner's workspace"
+else
+  fail "tab create did not target the spawner's workspace" "$(cat "$HERDR_LOG")"
+fi
+if grep -q "workspace create" "$HERDR_LOG"; then
+  fail "tab-mode spawn still created a new workspace" "$(cat "$HERDR_LOG")"
+else
+  pass "tab-mode spawn created no new workspace"
+fi
+if [[ "$(jq -r '.spawned_sessions[-1].pane_id' "$REPO_DIR/.claude/ralph-fork/$LOOP_ID/state.json")" == "wS:p9" ]]; then
+  pass "tab-mode recorded the tab's pane_id"
+else
+  fail "tab-mode did not record the tab's pane_id" "$(jq -c '.spawned_sessions' "$REPO_DIR/.claude/ralph-fork/$LOOP_ID/state.json")"
 fi
 
 echo ""

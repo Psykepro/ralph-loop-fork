@@ -49,3 +49,32 @@ herdr_derive_prefix() {
   local raw="ralph-${loop_id}-"
   printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-24
 }
+
+# Create the pane a new loop session runs in. Inside a herdr pane
+# ($HERDR_WORKSPACE_ID set and still alive) the session becomes a new TAB of
+# the spawner's workspace; otherwise it gets a fresh workspace. Sets WS_ID,
+# PANE_ID, HERDR_SPAWN_KIND (tab|workspace). Args: cwd label.
+herdr_spawn_root_pane() {
+  local cwd="$1" label="$2" json
+  if [[ -n "${HERDR_WORKSPACE_ID:-}" ]] && herdr workspace get "$HERDR_WORKSPACE_ID" >/dev/null 2>&1; then
+    json=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
+      echo "Error: herdr tab create failed (workspace $HERDR_WORKSPACE_ID)" >&2
+      return 1
+    }
+    WS_ID=$(jq -r '.result.tab.workspace_id' <<< "$json")
+    HERDR_SPAWN_KIND=tab
+  else
+    json=$(herdr workspace create --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
+      echo "Error: herdr workspace create failed" >&2
+      return 1
+    }
+    WS_ID=$(jq -r '.result.workspace.workspace_id' <<< "$json")
+    HERDR_SPAWN_KIND=workspace
+  fi
+  PANE_ID=$(jq -r '.result.root_pane.pane_id' <<< "$json")
+  if [[ -z "$WS_ID" || "$WS_ID" == "null" || -z "$PANE_ID" || "$PANE_ID" == "null" ]]; then
+    echo "Error: herdr $HERDR_SPAWN_KIND create did not return workspace_id/pane_id" >&2
+    echo "  Response: $json" >&2
+    return 1
+  fi
+}
