@@ -296,6 +296,24 @@ collect_herdr_workspaces_fallback() {
     | awk 'NF && !seen[$0]++' || true
 }
 
+# Tab-mode sessions (spawned into the spawner's workspace) carry the loop
+# label on the TAB, not the workspace — the workspace fallback above never
+# matches them, and closing that workspace would kill the spawner. Returns
+# tab ids, one per line.
+collect_herdr_tabs_fallback() {
+  local loop_id="$1"
+
+  if [[ "$HAS_HERDR" != "true" ]]; then
+    return 0
+  fi
+
+  local prefix
+  prefix=$(herdr_derive_prefix "$loop_id")
+  herdr tab list 2>/dev/null \
+    | jq -r --arg p "$prefix" '.result.tabs[]? | select(.label | startswith($p)) | .tab_id' 2>/dev/null \
+    | awk 'NF && !seen[$0]++' || true
+}
+
 # Collect tmux session names to kill for a given loop.
 # Priority:
 #   1) state.json .spawned_sessions[].name + .original_session_name (if jq + state.json)
@@ -401,7 +419,7 @@ cancel_loop() {
   #    by then the durable cleanup is already done.
   # 4. Print worktree cleanup hint AFTER kill (the worktree dir itself is left
   #    in place so the user can inspect it before removing).
-  local sessions worktree_path backend herdr_panes herdr_workspaces_fallback
+  local sessions worktree_path backend herdr_panes herdr_workspaces_fallback herdr_tabs_fallback
   local state_file="$loop_dir/state.json"
 
   # Determine backend BEFORE the state dir is deleted below — default
@@ -416,6 +434,7 @@ cancel_loop() {
     herdr_panes=$(collect_herdr_panes_for_loop "$loop_id")
     if [[ -z "$herdr_panes" ]]; then
       herdr_workspaces_fallback=$(collect_herdr_workspaces_fallback "$loop_id")
+      herdr_tabs_fallback=$(collect_herdr_tabs_fallback "$loop_id")
     fi
   else
     sessions=$(collect_sessions_for_loop "$loop_id")
@@ -436,10 +455,13 @@ cancel_loop() {
       while IFS= read -r pane_id; do
         kill_herdr_session "$pane_id"
       done <<< "$herdr_panes"
-    elif [[ -n "${herdr_workspaces_fallback:-}" ]]; then
+    elif [[ -n "${herdr_workspaces_fallback:-}${herdr_tabs_fallback:-}" ]]; then
       while IFS= read -r workspace_id; do
         kill_herdr_workspace_by_id "$workspace_id"
       done <<< "$herdr_workspaces_fallback"
+      while IFS= read -r tab_id; do
+        [[ -n "$tab_id" ]] && herdr tab close "$tab_id" 2>/dev/null && echo "  Closed herdr tab: $tab_id"
+      done <<< "$herdr_tabs_fallback"
     else
       echo "  No herdr panes/workspaces found to close."
     fi

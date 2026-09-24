@@ -219,17 +219,7 @@ echo "Forking to new herdr agent: $AGENT_NAME"
 # ============================================================================
 # SPAWN via herdr socket-API
 # ============================================================================
-WS_JSON=$(herdr workspace create --cwd "$CWD" --label "$AGENT_NAME" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
-  echo "Error: herdr workspace create failed" >&2
-  exit 1
-}
-WS_ID=$(echo "$WS_JSON" | jq -r '.result.workspace.workspace_id')
-PANE_ID=$(echo "$WS_JSON" | jq -r '.result.root_pane.pane_id')
-if [[ -z "$WS_ID" ]] || [[ "$WS_ID" == "null" ]] || [[ -z "$PANE_ID" ]] || [[ "$PANE_ID" == "null" ]]; then
-  echo "Error: herdr workspace create did not return workspace_id/pane_id" >&2
-  echo "  Response: $WS_JSON" >&2
-  exit 1
-fi
+herdr_spawn_root_pane "$CWD" "$AGENT_NAME" || exit 1
 
 # Env sanitation: the running herdr daemon's own environment may carry
 # CLAUDECODE=1 (and friends), inherited by the pane's shell. Launching
@@ -282,7 +272,7 @@ FORK_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq ".fork_history += [{\"session\": $SESSION_NUMBER, \"timestamp\": \"$FORK_TIMESTAMP\", \"agent_name\": \"$AGENT_NAME\"}] | .spawned_sessions += [{\"name\": \"$AGENT_NAME\", \"agent_name\": \"$AGENT_NAME\", \"workspace_id\": \"$WS_ID\", \"pane_id\": \"$PANE_ID\", \"session_number\": $SESSION_NUMBER, \"spawned_at\": \"$FORK_TIMESTAMP\"}]" "$STATE_FILE" > "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
 
-echo "Herdr agent $AGENT_NAME started (workspace $WS_ID, pane $PANE_ID)"
+echo "Herdr agent $AGENT_NAME started ($HERDR_SPAWN_KIND in workspace $WS_ID, pane $PANE_ID)"
 
 # ============================================================================
 # CLEANUP OLD SESSIONS — herdr equivalent of fork-terminal.sh's tmux
