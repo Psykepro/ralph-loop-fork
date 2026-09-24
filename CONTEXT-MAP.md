@@ -10,11 +10,22 @@
 - `hooks/stop-hook-fork.sh` — Stop hook: forks new session per iteration (tmux or herdr, per `backend`), blocks on pending background agents / completion promise / doom-loop detection.
 - `scripts/setup-ralph-loop-fork.sh` — entry point; resolves `--backend` (default `herdr` since v0.13.0), model/effort, worktree mode.
 - `scripts/fork-terminal-herdr.sh`, `scripts/lib-herdr-backend.sh` — herdr-backend spawn + shared agent-name derivation (sanitize+hash to fit herdr's `[a-z][a-z0-9_-]{0,31}` charset).
+- `scripts/lib-session-launch.sh` — `RALPH_DISALLOWED_TOOLS_ARG` + `RALPH_PARALLEL_SUBAGENTS_TEXT`, shared by all 4 claude launch sites and 6 prompt variants.
 
 ## Rules
 - Plugin version bumps (`plugin.json`) + `scripts/sync-live-install.py` on every hook/script change — see host CLAUDE.md "AEOS-Only Rules".
+- Every claude launch passes `$RALPH_DISALLOWED_TOOLS_ARG` in the `=` form (the flag is variadic; the space form eats the positional prompt). Guarded by `tests/test-wait-thrash-prevention.sh`.
 
 ## Changelog
+- 2026-09-24: v0.16.0 — stop wait-thrash. Iterations busy-waited on background sub-agents
+  (ScheduleWakeup / ListAgents / `ls` polling) instead of ending the turn, burning ~42-55% of
+  an affected session's tokens; the prompt wrongly said the stop hook "holds the session open
+  (BLOCK-and-wait)" although it has deferred silently since v0.8.0. All 4 launch sites now pass
+  `--disallowedTools=ScheduleWakeup`, and the 6 prompt variants share one rewritten block
+  telling the model to end its turn (new `scripts/lib-session-launch.sh`). Verified on CLI
+  2.1.281: the flag removes the deferred tool (ToolSearch returns no match) in headless and
+  herdr-interactive sessions. New `tests/test-wait-thrash-prevention.sh`, plus assertions in
+  the herdr and tmux fork tests.
 - 2026-08-11: v0.13.0 — `--backend` default flipped from `tmux` to `herdr`; `tmux` is now the
   explicit opt-in (`--backend tmux`). herdr binary + server-reachability checked at startup
   (retried 0/0.5/1s — a bare `VAR=$(cmd) || true` fix was needed here: an unguarded failing

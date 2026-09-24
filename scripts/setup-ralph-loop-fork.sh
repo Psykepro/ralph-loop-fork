@@ -14,6 +14,7 @@ set -euo pipefail
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # shellcheck source=./lib-herdr-backend.sh
 source "$PLUGIN_ROOT/scripts/lib-herdr-backend.sh"
+source "$PLUGIN_ROOT/scripts/lib-session-launch.sh"
 
 # Colors only when the stream is a real terminal (tmux attach, direct runs).
 # Captured output (Claude Code slash commands) shows raw escape bytes as
@@ -901,16 +902,10 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID)
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
-PARALLEL SUB-AGENTS:
-- Sub-agents run in the background by default; their results arrive as task notifications on a
-  later turn, not inline. Launch as many as you need, in one message for parallelism.
-- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
-  delivered its result — do NOT declare completion or output the promise until you have received
-  and integrated every result.
-- Do NOT spawn new sub-agents after outputting the promise.
+$RALPH_PARALLEL_SUBAGENTS_TEXT
 - Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
-  folders, or agent-*.jsonl files for orphaned work — the stop hook already waits for every
-  sub-agent this session launched; there is nothing to recover from a prior session.
+  folders, or agent-*.jsonl files for orphaned work — the loop does not advance while any
+  sub-agent this session launched is pending; there is nothing to recover from a prior session.
 
 BEFORE EXITING (MANDATORY):
 
@@ -936,16 +931,10 @@ else
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is session 1. Work through the checklist until complete.
 
-PARALLEL SUB-AGENTS:
-- Sub-agents run in the background by default; their results arrive as task notifications on a
-  later turn, not inline. Launch as many as you need, in one message for parallelism.
-- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
-  delivered its result — do NOT declare completion or output the promise until you have received
-  and integrated every result.
-- Do NOT spawn new sub-agents after outputting the promise.
+$RALPH_PARALLEL_SUBAGENTS_TEXT
 - Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/
-  folders, or agent-*.jsonl files for orphaned work — the stop hook already waits for every
-  sub-agent this session launched; there is nothing to recover from a prior session.
+  folders, or agent-*.jsonl files for orphaned work — the loop does not advance while any
+  sub-agent this session launched is pending; there is nothing to recover from a prior session.
 
 BEFORE EXITING (MANDATORY):
 
@@ -1097,7 +1086,7 @@ if [[ "$WORKTREE" == "true" ]]; then
       if [[ "$delay" != "0" ]]; then
         sleep "$delay"
       fi
-      if herdr agent start "$AGENT_NAME" --kind claude --pane "$PANE_ID" -- --dangerously-skip-permissions --model "$MODEL" --effort "$EFFORT"; then
+      if herdr agent start "$AGENT_NAME" --kind claude --pane "$PANE_ID" -- --dangerously-skip-permissions --model "$MODEL" --effort "$EFFORT" "$RALPH_DISALLOWED_TOOLS_ARG"; then
         AGENT_START_OK=true
         break
       fi
@@ -1157,7 +1146,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   # session on any path where the explicit flag were ever missing. Do NOT
   # unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate alias redirections
   # (e.g. Bedrock).
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
+  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG $RALPH_DISALLOWED_TOOLS_ARG '$INIT_MSG'"
   TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
 
   # Record the session so cancel-ralph-fork can clean it up.

@@ -189,6 +189,14 @@ else
   fail "FORK_CMD missing persisted model/effort flags" "$SPAWN3_LINE"
 fi
 
+# = form matters: --disallowedTools is variadic, so the space form would
+# swallow the positional init message that must still follow it.
+if grep -qE -- 'disallowedTools=ScheduleWakeup.*Read.*and.*execute' <<< "$SPAWN3_LINE"; then
+  pass "FORK_CMD removes ScheduleWakeup and keeps the init message positional"
+else
+  fail "FORK_CMD missing --disallowedTools=ScheduleWakeup before the init message" "$SPAWN3_LINE"
+fi
+
 echo ""
 echo "========================================"
 echo "Test Results"

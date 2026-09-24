@@ -162,6 +162,18 @@ else
   fail "agent start missing required flags" "$(cat "$HERDR_LOG")"
 fi
 
+if grep "agent start" "$HERDR_LOG" | grep -q -- "--disallowedTools=ScheduleWakeup"; then
+  pass "agent start removes ScheduleWakeup (= form, prompt-safe)"
+else
+  fail "agent start did not pass --disallowedTools=ScheduleWakeup" "$(grep "agent start" "$HERDR_LOG")"
+fi
+
+if grep -q "END YOUR TURN" "$HERDR_LOG" && ! grep -q "BLOCK-and-wait" "$HERDR_LOG"; then
+  pass "delivered prompt tells the iteration to end its turn, not block-and-wait"
+else
+  fail "delivered prompt still carries the block-and-wait wording" "$(grep -n "stop hook" "$HERDR_LOG")"
+fi
+
 if grep -q "agent prompt" "$HERDR_LOG"; then
   PROMPT_LINE=$(grep "agent prompt" "$HERDR_LOG")
   if grep -q -- "--wait" <<< "$PROMPT_LINE"; then

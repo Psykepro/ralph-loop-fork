@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+# Resolved before the cd below, which would break a relative BASH_SOURCE.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-session-launch.sh"
+
 # Arguments
 LOOP_ID="${1:?Error: Loop ID is required}"
 SESSION_NUMBER="${2:-1}"
@@ -191,13 +194,7 @@ RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID)
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
 
-PARALLEL SUB-AGENTS:
-- Sub-agents run in the background by default; their results arrive as task notifications on a
-  later turn, not inline. Launch as many as you need, in one message for parallelism.
-- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
-  delivered its result — do NOT declare completion or output the promise until you have received
-  and integrated every result.
-- Do NOT spawn new sub-agents after outputting the promise.
+$RALPH_PARALLEL_SUBAGENTS_TEXT
 
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x].
@@ -218,13 +215,7 @@ else
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
 - This is a continuation session. Work through the checklist until complete.
 
-PARALLEL SUB-AGENTS:
-- Sub-agents run in the background by default; their results arrive as task notifications on a
-  later turn, not inline. Launch as many as you need, in one message for parallelism.
-- The loop's stop hook holds the session open (BLOCK-and-wait) until every launched sub-agent has
-  delivered its result — do NOT declare completion or output the promise until you have received
-  and integrated every result.
-- Do NOT spawn new sub-agents after outputting the promise.
+$RALPH_PARALLEL_SUBAGENTS_TEXT
 
 BEFORE EXITING (MANDATORY):
 1. Update the checklist file - mark completed items with [x].
@@ -264,7 +255,7 @@ EFFORT_FLAG=" --effort $EFFORT"
 # environment can otherwise carry a leaked model/effort into the spawned
 # session. Do NOT unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate
 # alias redirections (e.g. Bedrock).
-FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG '$INIT_MSG'"
+FORK_CMD="unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL && export RALPH_LOOP_ACTIVE=1 && claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG $RALPH_DISALLOWED_TOOLS_ARG '$INIT_MSG'"
 
 # Validate CWD exists before spawning — catches deleted temp dirs (e.g., mktemp -d in tests)
 if [[ ! -d "$CWD" ]]; then
