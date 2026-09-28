@@ -126,6 +126,16 @@ if [[ -d ".claude" ]]; then
       echo "⚠️  skipping .claude overlay file (vanished before copy, likely a concurrent session): $f" >&2
       continue
     fi
+    # A directory here is a linked-worktree boundary, not a real untracked
+    # file: `git ls-files --others` doesn't descend into a directory holding
+    # its own `.git` (worktree or nested repo) and lists it as one opaque
+    # entry instead. Copying another worktree's entire tree into this new
+    # one is never correct (and a plain `cp`, no `-r`, fails on it outright)
+    # — skip it the same way the vanished-file race is skipped above.
+    if [[ -d "$f" ]]; then
+      echo "⚠️  skipping .claude overlay entry (a linked worktree/nested repo, not a plain file): $f" >&2
+      continue
+    fi
     mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
     cp "$f" "$WORKTREE_ABS/$f"
   done
@@ -142,6 +152,11 @@ if [[ -d "_project" ]]; then
     # Same concurrent-session race tolerance as the .claude/ overlay above.
     if [[ ! -e "$f" ]]; then
       echo "⚠️  skipping _project overlay file (vanished before copy, likely a concurrent session): $f" >&2
+      continue
+    fi
+    # Same linked-worktree-boundary guard as the .claude/ overlay above.
+    if [[ -d "$f" ]]; then
+      echo "⚠️  skipping _project overlay entry (a linked worktree/nested repo, not a plain file): $f" >&2
       continue
     fi
     mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
