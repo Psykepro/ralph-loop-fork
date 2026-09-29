@@ -346,6 +346,36 @@ fi
 git -C "$REPO5" worktree remove --force "$ABS5" 2>/dev/null
 rm -rf "$REPO5"
 
+echo -e "${YELLOW}Test 6: an untracked nested git repo inside --copy-paths / the checklist dir is skipped, not a fatal 'cp: is a directory'${NC}"
+
+REPO6=$(mktemp -d -t wt-setup-test6-XXXX)
+cd "$REPO6"
+git init -q -b main
+git config user.email t@t.local
+git config user.name t
+mkdir -p _project/progress/in-progress _project/scratch
+echo "# Checklist" > _project/progress/in-progress/checklist.md
+git add -f _project/progress/in-progress/checklist.md
+git commit -qm "fixture"
+MAIN_HEAD6=$(git rev-parse HEAD)
+# ls-files --others lists a nested repo as one opaque `dir/` entry.
+mkdir -p _project/scratch/inner _project/progress/in-progress/inner-checklist-repo
+git -C _project/scratch/inner init -q -b main
+git -C _project/progress/in-progress/inner-checklist-repo init -q -b main
+echo "plain" > _project/scratch/plain.txt
+
+ABS6=$(bash "$SETUP_WT" "loop6" ".worktrees/loop6" "ralph/loop6" "$MAIN_HEAD6" "_project/progress/in-progress" _project/scratch 2>/dev/null)
+RC6=$?
+if [[ $RC6 -eq 0 ]]; then
+  pass "Nested repos in --copy-paths and checklist dir did not abort setup"
+else
+  fail "setup aborted on a nested repo entry (cp: is a directory)" "rc=$RC6"
+fi
+[[ -f "$ABS6/_project/scratch/plain.txt" ]] && pass "Plain sibling file still copied" || fail "Plain sibling file missing" ""
+
+git -C "$REPO6" worktree remove --force "$ABS6" 2>/dev/null
+rm -rf "$REPO6"
+
 echo ""
 echo "========================================"
 echo "Test Results"

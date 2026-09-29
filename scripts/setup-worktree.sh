@@ -199,6 +199,10 @@ fi
 if [[ -n "$CHECKLIST_DIR" ]] && [[ "$CHECKLIST_DIR" != "." ]] && [[ -d "$CHECKLIST_DIR" ]]; then
   mkdir -p "$WORKTREE_ABS/$CHECKLIST_DIR"
   git ls-files --others -- "$CHECKLIST_DIR" | while IFS= read -r f; do
+    if [[ -d "$f" ]]; then
+      echo "⚠️  skipping checklist-dir entry (a nested repo/worktree, not a plain file): $f" >&2
+      continue
+    fi
     mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
     cp "$f" "$WORKTREE_ABS/$f"
   done
@@ -230,6 +234,10 @@ for src in "$@"; do
   if [[ -d "$src" ]]; then
     mkdir -p "$dest"
     git ls-files --others -- "$src" | while IFS= read -r f; do
+      if [[ -d "$f" ]]; then
+        echo "⚠️  skipping --copy-paths entry (a nested repo/worktree, not a plain file): $f" >&2
+        continue
+      fi
       mkdir -p "$WORKTREE_ABS/$(dirname "$f")"
       cp "$f" "$WORKTREE_ABS/$f"
     done
