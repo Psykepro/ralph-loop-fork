@@ -15,6 +15,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # shellcheck source=./lib-herdr-backend.sh
 source "$PLUGIN_ROOT/scripts/lib-herdr-backend.sh"
 source "$PLUGIN_ROOT/scripts/lib-session-launch.sh"
+source "$PLUGIN_ROOT/scripts/lib-spawn-lineage.sh"
 
 # Colors only when the stream is a real terminal (tmux attach, direct runs).
 # Captured output (Claude Code slash commands) shows raw escape bytes as
@@ -816,6 +817,7 @@ else
   "total_iterations": 0,
   "session_number": 1,
   "session_id": "$SESSION_ID",
+  "launcher_session_id": "${CLAUDE_CODE_SESSION_ID:-}",
   "completion_promise": $COMPLETION_PROMISE_JSON,
   "prompt": $(echo "$PROMPT" | jq -Rs .),
   "preserve_final_session": $PRESERVE_FINAL_SESSION,
@@ -1070,10 +1072,13 @@ if [[ "$WORKTREE" == "true" ]]; then
     INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
     AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
 
+    spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$AGENT_NAME"
     herdr_spawn_root_pane "$WORKTREE_PATH_ABS" "$AGENT_NAME" || {
       _err "herdr pane spawn failed"
       exit 1
     }
+    # Row before `agent start`: the child's bind row must never precede its spawn row.
+    spawn_lineage_record "$PANE_ID" "$WS_ID"
 
     # Env sanitation: see fork-terminal-herdr.sh's identical step — the
     # herdr daemon's own environment may carry CLAUDECODE=1 (live-verified
@@ -1095,6 +1100,7 @@ if [[ "$WORKTREE" == "true" ]]; then
     if [[ "$AGENT_START_OK" != "true" ]]; then
       _err "herdr agent start failed after retries"
       herdr pane close "$PANE_ID" 2>/dev/null || true
+      spawn_lineage_abort agent_start_failed
       exit 1
     fi
 
@@ -1111,7 +1117,8 @@ if [[ "$WORKTREE" == "true" ]]; then
       --arg ws "$WS_ID" \
       --arg pane "$PANE_ID" \
       --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{name: $name, agent_name: $agent_name, workspace_id: $ws, pane_id: $pane, started_at: $started, session_number: 1}')
+      --arg sid "$SPAWN_LINEAGE_ID" \
+      '{name: $name, agent_name: $agent_name, workspace_id: $ws, pane_id: $pane, started_at: $started, session_number: 1} + (if $sid != "" then {spawn_id: $sid} else {} end)')
     jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
       "$MOVED_STATE_FILE" > "$TMP_STATE"
     mv "$TMP_STATE" "$MOVED_STATE_FILE"
@@ -1147,13 +1154,20 @@ if [[ "$WORKTREE" == "true" ]]; then
   # unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate alias redirections
   # (e.g. Bedrock).
   FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG $RALPH_DISALLOWED_TOOLS_ARG '$INIT_MSG'"
-  TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" "$FORK_CMD"
+  spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$SESSION_NAME"
+  spawn_lineage_record "" ""
+  TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" ${SPAWN_TMUX_ENV[@]+"${SPAWN_TMUX_ENV[@]}"} "$FORK_CMD" || {
+    spawn_lineage_abort session_create_failed
+    _err "tmux session create failed"
+    exit 1
+  }
 
   # Record the session so cancel-ralph-fork can clean it up.
   SESSION_ENTRY=$(jq -n \
     --arg name "$SESSION_NAME" \
     --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{name: $name, started_at: $started, session_number: 1}')
+    --arg sid "$SPAWN_LINEAGE_ID" \
+    '{name: $name, started_at: $started, session_number: 1} + (if $sid != "" then {spawn_id: $sid} else {} end)')
   jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
     "$MOVED_STATE_FILE" > "$TMP_STATE"
   mv "$TMP_STATE" "$MOVED_STATE_FILE"

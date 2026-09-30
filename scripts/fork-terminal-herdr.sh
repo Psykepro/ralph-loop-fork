@@ -28,6 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib-herdr-backend.sh
 source "$SCRIPT_DIR/lib-herdr-backend.sh"
 source "$SCRIPT_DIR/lib-session-launch.sh"
+source "$SCRIPT_DIR/lib-spawn-lineage.sh"
 
 LOOP_DIR=".claude/ralph-fork/$LOOP_ID"
 STATE_FILE="$LOOP_DIR/state.json"
@@ -208,7 +209,10 @@ echo "Forking to new herdr agent: $AGENT_NAME"
 # ============================================================================
 # SPAWN via herdr socket-API
 # ============================================================================
+spawn_lineage_begin "$PROJECT_ROOT" "$LOOP_ID" "$SESSION_NUMBER" "$STATE_FILE" "$AGENT_NAME"
 herdr_spawn_root_pane "$CWD" "$AGENT_NAME" || exit 1
+# Row before `agent start`: the child's bind row must never precede its spawn row.
+spawn_lineage_record "$PANE_ID" "$WS_ID"
 
 # Env sanitation: the running herdr daemon's own environment may carry
 # CLAUDECODE=1 (and friends), inherited by the pane's shell. Launching
@@ -239,6 +243,7 @@ if [[ "$AGENT_START_OK" != "true" ]]; then
   [[ -f "/tmp/herdr-agent-start-err.$$" ]] && cat "/tmp/herdr-agent-start-err.$$" >&2
   rm -f "/tmp/herdr-agent-start-err.$$"
   herdr pane close "$PANE_ID" 2>/dev/null || true
+  spawn_lineage_abort agent_start_failed
   exit 1
 fi
 rm -f "/tmp/herdr-agent-start-err.$$"
@@ -258,7 +263,7 @@ herdr agent send-keys "$AGENT_NAME" Enter || {
 
 # Log the fork event and record the new session's identifiers.
 FORK_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-jq ".fork_history += [{\"session\": $SESSION_NUMBER, \"timestamp\": \"$FORK_TIMESTAMP\", \"agent_name\": \"$AGENT_NAME\"}] | .spawned_sessions += [{\"name\": \"$AGENT_NAME\", \"agent_name\": \"$AGENT_NAME\", \"workspace_id\": \"$WS_ID\", \"pane_id\": \"$PANE_ID\", \"session_number\": $SESSION_NUMBER, \"spawned_at\": \"$FORK_TIMESTAMP\"}]" "$STATE_FILE" > "${STATE_FILE}.tmp"
+jq --arg sid "$SPAWN_LINEAGE_ID" ".fork_history += [{\"session\": $SESSION_NUMBER, \"timestamp\": \"$FORK_TIMESTAMP\", \"agent_name\": \"$AGENT_NAME\"}] | .spawned_sessions += [{\"name\": \"$AGENT_NAME\", \"agent_name\": \"$AGENT_NAME\", \"workspace_id\": \"$WS_ID\", \"pane_id\": \"$PANE_ID\", \"session_number\": $SESSION_NUMBER, \"spawned_at\": \"$FORK_TIMESTAMP\"} + (if \$sid != \"\" then {spawn_id: \$sid} else {} end)]" "$STATE_FILE" > "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
 
 echo "Herdr agent $AGENT_NAME started ($HERDR_SPAWN_KIND in workspace $WS_ID, pane $PANE_ID)"

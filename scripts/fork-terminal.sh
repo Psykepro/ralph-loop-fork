@@ -11,6 +11,7 @@ set -euo pipefail
 
 # Resolved before the cd below, which would break a relative BASH_SOURCE.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-session-launch.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-spawn-lineage.sh"
 
 # Arguments
 LOOP_ID="${1:?Error: Loop ID is required}"
@@ -268,14 +269,18 @@ echo "Forking to new session: $SESSION_NAME"
 
 # Spawn detached tmux session
 # Must unset TMUX in the env to avoid "sessions should be nested with care" when spawning from inside tmux
-TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$CWD" -e "RALPH_LOOP_ACTIVE=1" "$FORK_CMD" 2>&1 || {
+spawn_lineage_begin "$PROJECT_ROOT" "$LOOP_ID" "$SESSION_NUMBER" "$STATE_FILE" "$SESSION_NAME"
+# Row before the session starts: the child's bind row must never precede its spawn row.
+spawn_lineage_record "" ""
+TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$CWD" -e "RALPH_LOOP_ACTIVE=1" ${SPAWN_TMUX_ENV[@]+"${SPAWN_TMUX_ENV[@]}"} "$FORK_CMD" 2>&1 || {
   echo "Error: Failed to create tmux session $SESSION_NAME" >&2
+  spawn_lineage_abort session_create_failed
   exit 1
 }
 
 # Log the fork event and store session name in spawned_sessions for cleanup
 FORK_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-jq ".fork_history += [{\"session\": $SESSION_NUMBER, \"timestamp\": \"$FORK_TIMESTAMP\", \"session_name\": \"$SESSION_NAME\"}] | .spawned_sessions += [{\"name\": \"$SESSION_NAME\", \"spawned_at\": \"$FORK_TIMESTAMP\"}]" "$STATE_FILE" > "${STATE_FILE}.tmp"
+jq --arg sid "$SPAWN_LINEAGE_ID" ".fork_history += [{\"session\": $SESSION_NUMBER, \"timestamp\": \"$FORK_TIMESTAMP\", \"session_name\": \"$SESSION_NAME\"}] | .spawned_sessions += [{\"name\": \"$SESSION_NAME\", \"spawned_at\": \"$FORK_TIMESTAMP\"} + (if \$sid != \"\" then {spawn_id: \$sid} else {} end)]" "$STATE_FILE" > "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
 
 echo "Session $SESSION_NAME started"

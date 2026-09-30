@@ -1144,7 +1144,8 @@ compute_progress_fingerprint() {
   # session and the breaker could never fire again — the false-positive fix
   # must not become a false-negative machine. Extra excludes come from
   # .progress_exclude[] in .aeos-config.json. Shared by components 2 and 3.
-  local excludes="_project/metrics _project/signals .claude/ralph-fork BLOCKER.md"
+  # spawn-registry dirs (default locations) are hook/spawn-appended, like the jsonl above.
+  local excludes="_project/metrics _project/signals .claude/ralph-fork .claude/spawn-registry _project/aeos/runtime/spawn-registry BLOCKER.md"
   local extra
   extra=$(jq -r '.progress_exclude[]? // empty' "$aeos_config" 2>/dev/null | tr '\n' ' ') || extra=""
   excludes="$excludes $extra"
@@ -1214,6 +1215,14 @@ debug_log "CLAUDE_PLUGIN_ROOT: ${CLAUDE_PLUGIN_ROOT:-not set}"
 # Read hook input
 HOOK_INPUT=$(cat)
 debug_log "Hook input received: ${#HOOK_INPUT} bytes"
+
+# Spawn-registry rotation/retention sweep [ASYNC, fail-open]. Deliberately
+# BEFORE every early exit below (no-loop sessions still write/age rows).
+if command -v python3 >/dev/null 2>&1; then
+  SWEEP_ERR=$(printf '%s' "$HOOK_INPUT" | python3 "$(dirname "$0")/spawn-sweep-hook.py" 2>&1 >/dev/null) \
+    || debug_log "spawn-sweep hook failed: $SWEEP_ERR"
+  [[ -n "${SWEEP_ERR:-}" ]] && debug_log "spawn-sweep: $SWEEP_ERR"
+fi
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$(dirname "$0")")}"
 

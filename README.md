@@ -523,6 +523,17 @@ Neither behavior requires `.aeos-config.json` — the signals-dir check and the 
 
 ---
 
+## Spawn lineage (optional, on by default)
+
+Each loop session spawn appends one row to a small append-only registry
+(`<project>/.claude/spawn-registry/` standalone; AEOS projects use their own default) so tools can
+show which session launched which. The child gets `SPAWN_ID`/`SPAWN_REGISTRY_DIR` in its
+environment and a SessionStart hook binds its session id. Loop iterations form one synthetic
+loop node whose parent is the launching session (`launcher_session_id` in `state.json`).
+Failures print one `⚠️  spawn-registry:` line and never block a spawn. Disable with
+`SPAWN_REGISTRY_DISABLE=1`. If the registry lives outside the default locations, add its path to
+`progress_exclude` in `.aeos-config.json` so its writes are not read as loop progress.
+
 ## Comparison with standard ralph-loop
 
 | Feature | `/ralph-loop` | `/ralph-loop-fork` |

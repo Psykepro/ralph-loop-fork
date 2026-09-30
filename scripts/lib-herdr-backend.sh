@@ -57,14 +57,14 @@ herdr_derive_prefix() {
 herdr_spawn_root_pane() {
   local cwd="$1" label="$2" json
   if [[ -n "${HERDR_WORKSPACE_ID:-}" ]] && herdr workspace get "$HERDR_WORKSPACE_ID" >/dev/null 2>&1; then
-    json=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
+    json=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" ${SPAWN_HERDR_ENV[@]+"${SPAWN_HERDR_ENV[@]}"} --no-focus) || {
       echo "Error: herdr tab create failed (workspace $HERDR_WORKSPACE_ID)" >&2
       return 1
     }
     WS_ID=$(jq -r '.result.tab.workspace_id' <<< "$json")
     HERDR_SPAWN_KIND=tab
   else
-    json=$(herdr workspace create --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" --no-focus) || {
+    json=$(herdr workspace create --cwd "$cwd" --label "$label" --env "RALPH_LOOP_ACTIVE=1" ${SPAWN_HERDR_ENV[@]+"${SPAWN_HERDR_ENV[@]}"} --no-focus) || {
       echo "Error: herdr workspace create failed" >&2
       return 1
     }
