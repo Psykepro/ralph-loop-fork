@@ -22,6 +22,7 @@ re-copies the cache, just re-run this script.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -79,6 +80,25 @@ def ensure_symlink(version_dir: Path) -> str:
     return "linked"
 
 
+def check_parity() -> None:
+    """Spawn-registry parity vs the AEOS canonical module, when an AEOS checkout is named.
+
+    Set AEOS_REPO_ROOT to run it; unset prints a skip line. Drift warns (never blocks a pin)."""
+    root = os.environ.get("AEOS_REPO_ROOT")
+    if not root:
+        print("⚠️  spawn-registry parity skipped: set AEOS_REPO_ROOT to check the plugin copy")
+        return
+    script = Path(root) / ".claude" / "scripts" / "check-spawn-registry-parity.py"
+    if not script.is_file():
+        print(f"⚠️  spawn-registry parity skipped: {script} not found")
+        return
+    proc = subprocess.run([sys.executable, str(script), "--plugin", str(LIVE_REPO)],
+                          capture_output=True, text=True)
+    print((proc.stdout + proc.stderr).rstrip())
+    if proc.returncode != 0:
+        print("❌ spawn-registry parity FAILED — the plugin copy must be byte-identical to the canonical module")
+
+
 def main() -> None:
     version = live_version()
     sha = live_sha()
@@ -119,6 +139,7 @@ def main() -> None:
 
     print(f"\n✅ All {PLUGIN_NAME} installs now resolve to: {LIVE_REPO} (v{version}, {sha[:7]})")
     print("   Reminder: bump .claude-plugin/plugin.json version on every change, then re-run this script.")
+    check_parity()
 
 
 if __name__ == "__main__":

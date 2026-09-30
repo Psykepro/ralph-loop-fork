@@ -3,13 +3,14 @@
 | hooks/ | dir | ~2600 | Stop-hook state machine (fork on stop, defer silently on pending bg agents, block on promise / doom-loop); dual-backend cleanup dispatch (tmux kill-session vs herdr pane close) branches on state.json's `backend` field; doom-loop fingerprint excludes Session-N-Notes-only churn | jq, tmux, herdr, git | Claude Code Stop hook config | hooks/stop-hook-fork.sh | yes |
 | scripts/ | dir | ~3400 | Setup/fork/cancel/init helpers + live-install sync, dual-backend (tmux default until 2026-08-11, now herdr default / `--backend tmux` opt-out) | tmux, herdr, jq, git | hooks/, commands/ | scripts/setup-ralph-loop-fork.sh | yes |
 | commands/ | dir | small | Slash-command docs for ralph-loop-fork, help, init, cancel | - | Claude Code CLI | commands/ralph-loop-fork.md | no |
-| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends | jq | CI / manual runs | - | no |
+| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends; `test-spawn-lineage.sh` covers lineage rows, SPAWN_* env, bind/sweep hooks, fingerprint exclusion | jq | CI / manual runs | - | no |
 | _project/ | dir | - | AEOS project scaffolding carried into this plugin repo | - | - | - | no |
 
 ## Key Exports
 - `hooks/stop-hook-fork.sh` — Stop hook: forks new session per iteration (tmux or herdr, per `backend`), blocks on pending background agents / completion promise / doom-loop detection.
 - `scripts/setup-ralph-loop-fork.sh` — entry point; resolves `--backend` (default `herdr` since v0.13.0), model/effort, worktree mode.
 - `scripts/fork-terminal-herdr.sh`, `scripts/lib-herdr-backend.sh` — herdr-backend spawn + shared agent-name derivation (sanitize+hash to fit herdr's `[a-z][a-z0-9_-]{0,31}` charset).
+- `scripts/lib-spawn-lineage.sh`, `scripts/spawn_registry.py`, `hooks/spawn-bind-hook.py`, `hooks/spawn-sweep-hook.py` — spawn lineage (fail-open; `spawn_registry.py` must stay byte-identical to the AEOS canonical module).
 - `scripts/lib-session-launch.sh` — `RALPH_DISALLOWED_TOOLS_ARG` + `RALPH_PARALLEL_SUBAGENTS_TEXT`, shared by all 4 claude launch sites and 6 prompt variants.
 
 ## Rules
@@ -17,6 +18,15 @@
 - Every claude launch passes `$RALPH_DISALLOWED_TOOLS_ARG` in the `=` form (the flag is variadic; the space form eats the positional prompt). Guarded by `tests/test-wait-thrash-prevention.sh`.
 
 ## Changelog
+- 2026-09-30: v0.17.0 — spawn lineage. Every loop session spawn records one `spawn` row (loop_id,
+  iteration, prev_spawn_id, launcher parent from `state.json` `launcher_session_id`) in the spawn
+  registry and exports `SPAWN_*` to the child (herdr `--env`, tmux `-e`) so a SessionStart hook
+  (`hooks/spawn-bind-hook.py`, no-op when the project ships its own `spawn-bind.py`) binds the
+  session. Registry module `scripts/spawn_registry.py` is a byte-identical copy of the canonical
+  one (parity checked by `sync-live-install.py` via `AEOS_REPO_ROOT`). Stop hook fires a detached
+  rate-limited sweep (`hooks/spawn-sweep-hook.py`) before any early exit; registry dirs are
+  excluded from the doom-loop fingerprint. Kill-switch `SPAWN_REGISTRY_DISABLE=1`. New
+  `tests/test-spawn-lineage.sh`. Standalone default dir: `<root>/.claude/spawn-registry/`.
 - 2026-09-24: v0.16.0 — stop wait-thrash. Iterations busy-waited on background sub-agents
   (ScheduleWakeup / ListAgents / `ls` polling) instead of ending the turn, burning ~42-55% of
   an affected session's tokens; the prompt wrongly said the stop hook "holds the session open
