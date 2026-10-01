@@ -182,18 +182,15 @@ def resolve_registry_dir(root: Any = None, env: Optional[Dict[str, str]] = None)
 
 
 def _switch_root(root: Any, env: Dict[str, str]) -> Optional[Path]:
-    """First project root any anchor yields. An explicit/CLAUDE_PROJECT_DIR anchor that is not a repo
-    is loud; the rest are best-effort: SPAWN_REGISTRY_DIR's repo (spawned sessions inherit it but not
-    CLAUDE_PROJECT_DIR), this checkout, cwd."""
-    for strict in (root, env.get("CLAUDE_PROJECT_DIR")):
-        if strict:
-            return main_checkout(strict)
+    """First project root any anchor yields, in order: explicit root, CLAUDE_PROJECT_DIR, SPAWN_REGISTRY_DIR's
+    repo (spawned sessions inherit it), this checkout, cwd. An anchor that is not inside a repo falls
+    through (a bind must not be dropped over a stray anchor); no root at all means enabled."""
     here = Path(__file__).resolve()
-    soft: List[Any] = [env.get("SPAWN_REGISTRY_DIR")]
+    cands: List[Any] = [root, env.get("CLAUDE_PROJECT_DIR"), env.get("SPAWN_REGISTRY_DIR")]
     if len(here.parents) > 3 and here.parents[2].name == ".claude":
-        soft.append(here.parents[3])
-    soft.append(Path.cwd())
-    for cand in soft:
+        cands.append(here.parents[3])
+    cands.append(Path.cwd())
+    for cand in cands:
         if cand:
             try:
                 return main_checkout(cand)
@@ -402,22 +399,41 @@ class Reader:
             files.append(live)
         return files
 
+    def _snapshot(self) -> Tuple[List[Tuple[Path, Any]], bool]:
+        """(path, stat) per listed file, deduped by inode; False when a listed path vanished before its stat."""
+        files, seen, clean = [], set(), True
+        for p in self._files():
+            try:
+                st = p.stat()
+            except OSError:
+                clean = False
+                continue
+            if st.st_ino not in seen:
+                seen.add(st.st_ino)
+                files.append((p, st))
+        return files, clean
+
+    def _needs_refold(self, files: List[Tuple[Path, Any]]) -> bool:
+        listed = {st.st_ino for _, st in files}
+        # shrunk file, or a tracked segment vanished (sweep expiry): folded rows may be stale
+        return (any(st.st_size < self._offsets.get(st.st_ino, 0) for _, st in files)
+                or any(ino not in listed for ino in self._offsets))
+
     def poll(self) -> List[Dict[str, Any]]:
         self.refolded = False
         out: List[Dict[str, Any]] = []
-        files = []
-        for p in self._files():
-            try:
-                files.append((p, p.stat()))
-            except OSError:
-                continue
-        listed = {st.st_ino for _, st in files}
-        # shrunk file, or a tracked segment vanished (sweep expiry): folded rows may be stale
-        if (any(st.st_size < self._offsets.get(st.st_ino, 0) for _, st in files)
-                or any(ino not in listed for ino in self._offsets)):
-            self._offsets.clear()
-            self.skipped = 0
-            self.refolded = True
+        # WHY: a rotation racing the listing looks like a vanished segment; refold only once two
+        # clean listings agree, else keep the cursor so the next poll reads everything consistently.
+        for _ in range(3):
+            files, clean = self._snapshot()
+            if not self._needs_refold(files):
+                break
+            again, clean2 = self._snapshot()
+            if clean and clean2 and {st.st_ino for _, st in again} == {st.st_ino for _, st in files}:
+                self._offsets.clear()
+                self.skipped = 0
+                self.refolded = True
+                break
         for p, st in files:
             off = self._offsets.get(st.st_ino, 0)
             if st.st_size <= off:
@@ -482,11 +498,10 @@ def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, An
     `liveness(session_id)` returns running|idle|needs-you for a live session, None for a gone one.
     `liveness=None` -> bound sessions read `idle` with `liveness: "unknown"` (never guessed dead)."""
     spawns: Dict[str, Dict[str, Any]] = {}
-    malformed = 0
-    for e in events:
-        if not well_formed(e):
-            malformed += 1
-            continue
+    ordered = [e for e in events if well_formed(e)]
+    malformed = len(events) - len(ordered)
+    # WHY: segment replay can surface a bind before its spawn; spawns first, then binds/ends in order.
+    for e in sorted(ordered, key=lambda e: e.get("type") != "spawn"):
         sid = e.get("spawn_id")
         t = e.get("type")
         if t == "spawn" and sid and sid not in spawns:
