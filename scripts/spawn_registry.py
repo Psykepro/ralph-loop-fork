@@ -283,7 +283,10 @@ def append_line(reg_dir: Any, line: bytes) -> bool:
 def _capped_append(path: Path, text: str, cap: int) -> None:
     with contextlib.suppress(OSError):
         if path.stat().st_size >= cap:
-            os.replace(str(path), str(path) + ".1")
+            # non-blocking lock + re-stat: a concurrent writer that lost the race must not replace .1 with a fresh log
+            with _rotate_lock(path.parent, 0) as got:
+                if got and path.stat().st_size >= cap:
+                    os.replace(str(path), str(path) + ".1")
     with open(path, "a", encoding="utf-8") as f:
         f.write(text)
 
@@ -433,6 +436,10 @@ def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, An
                            "ended": False, "children": []}
         elif sid in spawns and t == "bind" and e.get("session_id"):
             n = spawns[sid]
+            # WHY: the pane env leaks SPAWN_ID to descendant `claude` runs, whose startup binds are not this
+            # spawn's lineage; only the first startup binds (resume/clear/compact/fork rebinds still apply).
+            if e.get("source") == "startup" and n["session_ids"] and e["session_id"] not in n["session_ids"]:
+                continue
             if e["session_id"] not in n["session_ids"]:
                 n["session_ids"].append(e["session_id"])
             n["session_id"] = e["session_id"]
@@ -679,6 +686,15 @@ def _fail(msg: str, code: int = 1) -> int:
     return code
 
 
+def _sweep_failed(reg_dir: Path, msg: str) -> int:
+    """Loud failure + drop the `.last-sweep` claim so the next spawn retries instead of waiting 24 h."""
+    log_failure(reg_dir, msg)
+    record_metric(reg_dir, "sweep_failure")
+    with contextlib.suppress(OSError):
+        (reg_dir / ".last-sweep").unlink()
+    return _fail(msg)
+
+
 def _cmd_write(args: argparse.Namespace, build: Callable[[], Dict[str, Any]], emit: Optional[str] = None) -> int:
     t0 = time.perf_counter()
     try:
@@ -767,10 +783,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(resolved.as_dict()) if args.json else f"{resolved.path}  (source: {resolved.source})")
         return 0
     if args.cmd == "sweep":
-        res = sweep(resolved.path)
+        try:
+            res = sweep(resolved.path)
+        except OSError as exc:
+            return _sweep_failed(resolved.path, f"sweep failed: {exc}")
+        if not res["locked"]:
+            return _sweep_failed(resolved.path, "sweep skipped: could not acquire .rotate.lock within timeout")
         if not args.quiet:
             print(json.dumps(res))
-        return 0 if res["locked"] else _fail("sweep skipped: could not acquire .rotate.lock within timeout")
+        return 0
     if args.cmd == "status":
         st = collect_status(resolved.path)
         st["source"] = resolved.source
