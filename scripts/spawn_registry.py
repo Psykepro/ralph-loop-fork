@@ -440,6 +440,10 @@ class Reader:
                 continue
             try:
                 with open(p, "rb") as f:
+                    fst = os.fstat(f.fileno())
+                    # WHY: path was re-pointed (rotation) after the stat; the cursor belongs to the old inode
+                    if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                        continue
                     f.seek(off)
                     chunk = f.read()
             except OSError:
