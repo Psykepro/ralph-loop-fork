@@ -2,8 +2,8 @@
 """Stop hook helper: rate-limited detached registry sweep [ASYNC].
 
 Runs before every early exit of stop-hook-fork.sh. Acts only in a project that
-uses ralph-loop-fork (has `.claude/ralph-fork/`) and never creates the registry
-dir, so unrelated repos are untouched. Silent no-op otherwise; fail-open.
+uses ralph-loop-fork (has `.claude/ralph-fork/`); resolving the registry path may
+create its dir there, so unrelated repos are untouched. Silent no-op otherwise; fail-open.
 Python 3.9 compatible.
 """
 
