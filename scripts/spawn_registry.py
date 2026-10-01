@@ -22,6 +22,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -180,17 +181,39 @@ def resolve_registry_dir(root: Any = None, env: Optional[Dict[str, str]] = None)
     return Resolved(path, "default", rootp)
 
 
+def _switch_root(root: Any, env: Dict[str, str]) -> Optional[Path]:
+    """First project root any anchor yields. An explicit/CLAUDE_PROJECT_DIR anchor that is not a repo
+    is loud; the rest are best-effort: SPAWN_REGISTRY_DIR's repo (spawned sessions inherit it but not
+    CLAUDE_PROJECT_DIR), this checkout, cwd."""
+    for strict in (root, env.get("CLAUDE_PROJECT_DIR")):
+        if strict:
+            return main_checkout(strict)
+    here = Path(__file__).resolve()
+    soft: List[Any] = [env.get("SPAWN_REGISTRY_DIR")]
+    if len(here.parents) > 3 and here.parents[2].name == ".claude":
+        soft.append(here.parents[3])
+    soft.append(Path.cwd())
+    for cand in soft:
+        if cand:
+            try:
+                return main_checkout(cand)
+            except (RegistryConfigError, OSError):
+                continue
+    return None
+
+
 def is_disabled(root: Any = None, env: Optional[Dict[str, str]] = None) -> bool:
     """Single kill-switch: env SPAWN_REGISTRY_DISABLE=1 or `rules.spawn-lineage=false`.
 
-    Settings are read only when a root is given or CLAUDE_PROJECT_DIR is set (cheap hot path)."""
+    The setting is read from whichever project root any anchor yields, even when
+    SPAWN_REGISTRY_DIR is set; no determinable root means enabled."""
     env = os.environ if env is None else env
     if env.get("SPAWN_REGISTRY_DISABLE") == "1":
         return True
-    anchor = root or env.get("CLAUDE_PROJECT_DIR")
-    if not anchor:
+    anchor = _switch_root(root, env)
+    if anchor is None:
         return False
-    return (_read_settings(main_checkout(anchor)).get("rules") or {}).get("spawn-lineage") is False
+    return (_read_settings(anchor).get("rules") or {}).get("spawn-lineage") is False
 
 
 # ------------------------------------------------------------------ rows
@@ -353,14 +376,18 @@ def bind_from_env(payload: Dict[str, Any], env: Optional[Dict[str, str]] = None)
 
 
 # ------------------------------------------------------------------ reader
+_SEGMENT_RE = re.compile(r"^spawns-\d{8}T\d{12}Z-\d+-[0-9a-f]{8}\.jsonl$")
+
+
 def _segments(reg_dir: Path) -> List[Path]:
-    return sorted(reg_dir.glob("spawns-*.jsonl"), key=lambda p: p.name)
+    """Only names `_segment_name` produced; foreign `spawns-*.jsonl` files are never read/rotated/expired."""
+    return sorted((p for p in reg_dir.glob("spawns-*.jsonl") if _SEGMENT_RE.match(p.name)), key=lambda p: p.name)
 
 
 class Reader:
     """Incremental tail fold. Cursor is keyed by inode, so a rotation rename is invisible and
     late writes into an already-rotated segment are still picked up. `refolded` is set when a
-    truncation forced a full re-read (the returned events are then the complete set)."""
+    truncation or a vanished segment forced a full re-read (the returned events are then the complete set)."""
 
     def __init__(self, reg_dir: Any):
         self.dir = Path(reg_dir)
@@ -384,7 +411,10 @@ class Reader:
                 files.append((p, p.stat()))
             except OSError:
                 continue
-        if any(st.st_size < self._offsets.get(st.st_ino, 0) for _, st in files):
+        listed = {st.st_ino for _, st in files}
+        # shrunk file, or a tracked segment vanished (sweep expiry): folded rows may be stale
+        if (any(st.st_size < self._offsets.get(st.st_ino, 0) for _, st in files)
+                or any(ino not in listed for ino in self._offsets)):
             self._offsets.clear()
             self.skipped = 0
             self.refolded = True
@@ -624,12 +654,25 @@ def _segment_name(reg_dir: Path) -> str:
     return f"spawns-{stamp}-{os.getpid()}-{uuid.uuid4().hex[:8]}.jsonl"
 
 
+def _env_segment_cap() -> int:
+    raw = os.environ.get("SPAWN_REGISTRY_MAX_SEGMENT_BYTES")
+    if not raw:
+        return DEFAULT_MAX_SEGMENT_BYTES
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 0
+    if val <= 0:
+        raise RegistryConfigError(f"SPAWN_REGISTRY_MAX_SEGMENT_BYTES must be a positive integer, got {raw!r}")
+    return val
+
+
 def sweep(reg_dir: Any, max_segment_bytes: Optional[int] = None, ttl_days: int = RETENTION_DAYS,
           lock_timeout: float = SWEEP_LOCK_TIMEOUT_S) -> Dict[str, Any]:
     """Rotate the live file when big and expire old segments, under `.rotate.lock` (registry files only)."""
     d = Path(reg_dir)
     if max_segment_bytes is None:
-        max_segment_bytes = int(os.environ.get("SPAWN_REGISTRY_MAX_SEGMENT_BYTES") or DEFAULT_MAX_SEGMENT_BYTES)
+        max_segment_bytes = _env_segment_cap()
     result: Dict[str, Any] = {"rotated": False, "segment": None, "expired": [], "locked": True}
     with _rotate_lock(d, lock_timeout) as got:
         if not got:
@@ -831,8 +874,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.cmd == "sweep":
         try:
             res = sweep(resolved.path)
-        except OSError as exc:
-            return _sweep_failed(resolved.path, f"sweep failed: {exc}")
+        except Exception as exc:  # loud always: the detached run has stderr on DEVNULL
+            return _sweep_failed(resolved.path, f"sweep failed: {type(exc).__name__}: {exc}")
         if not res["locked"]:
             return _sweep_failed(resolved.path, "sweep skipped: could not acquire .rotate.lock within timeout")
         if not args.quiet:
