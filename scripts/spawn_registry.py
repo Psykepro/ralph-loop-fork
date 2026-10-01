@@ -276,6 +276,13 @@ def append_line(reg_dir: Any, line: bytes) -> bool:
     finally:
         os.close(fd)
     if n != len(line):
+        if n:  # terminate the partial line so the next row doesn't concatenate onto it
+            with contextlib.suppress(OSError):
+                fd = os.open(str(Path(reg_dir) / LIVE_NAME), os.O_WRONLY | os.O_APPEND)
+                try:
+                    os.write(fd, b"\n")
+                finally:
+                    os.close(fd)
         raise OSError(f"short write {n}/{len(line)}")
     return True
 
@@ -417,13 +424,39 @@ def read_all(reg_dir: Any) -> Tuple[List[Dict[str, Any]], int]:
 Liveness = Optional[Callable[[str], Optional[str]]]
 
 
+def _opt(v: Any, typ: Any) -> bool:
+    return v is None or isinstance(v, typ)
+
+
+def _well_formed(e: Any) -> bool:
+    """Field-shape check for the events build_tree reads; unknown `type`s pass (ignored by the fold)."""
+    if not isinstance(e, dict) or not isinstance(e.get("spawn_id"), str):
+        return False
+    t = e.get("type")
+    if t == "spawn":
+        child, parent, loop = e.get("child"), e.get("parent"), e.get("loop")
+        if not (_opt(child, dict) and _opt(parent, dict) and _opt(loop, dict)):
+            return False
+        return (all(_opt((child or {}).get(k), str) for k in ("name", "pane_id", "workspace_id", "kind"))
+                and all(_opt((parent or {}).get(k), str) for k in ("session_id", "name"))
+                and all(_opt((loop or {}).get(k), str) for k in ("loop_id", "prev_spawn_id"))
+                and _opt((loop or {}).get("iteration"), int) and _opt(e.get("spawner"), str) and _opt(e.get("ts"), str))
+    if t == "bind":
+        return isinstance(e.get("session_id"), str) and _opt(e.get("source"), str)
+    return True
+
+
 def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, Any]:
     """Pure fold of registry events into a flat `nodes` map + `roots` (ids); children are id lists.
 
     `liveness(session_id)` returns running|idle|needs-you for a live session, None for a gone one.
     `liveness=None` -> bound sessions read `idle` with `liveness: "unknown"` (never guessed dead)."""
     spawns: Dict[str, Dict[str, Any]] = {}
+    malformed = 0
     for e in events:
+        if not _well_formed(e):
+            malformed += 1
+            continue
         sid = e.get("spawn_id")
         t = e.get("type")
         if t == "spawn" and sid and sid not in spawns:
@@ -502,8 +535,10 @@ def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, An
     for nid in list(nodes):  # break cycles: a node whose ancestor chain returns to itself becomes a root
         seen, cur = {nid}, nodes[nid].get("parent_id")
         while cur:
-            if cur in seen:
+            if cur == nid:
                 nodes[nid]["parent_id"] = None
+                break
+            if cur in seen:  # chain enters a cycle that excludes this node; the cycle's own members break it
                 break
             seen.add(cur)
             cur = nodes[cur].get("parent_id")
@@ -531,7 +566,7 @@ def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, An
     for n in spawns.values():
         counts[n["state"]] = counts.get(n["state"], 0) + 1
     roots = [n["id"] for n in nodes.values() if not n.get("parent_id")]
-    return {"roots": roots, "nodes": nodes, "counts": counts}
+    return {"roots": roots, "nodes": nodes, "counts": counts, "malformed_events": malformed}
 
 
 def render_tree(tree: Dict[str, Any]) -> str:
@@ -638,6 +673,8 @@ def maybe_detached_sweep(reg_dir: Any) -> bool:
             start_new_session=True, close_fds=True,
         )
     except OSError as exc:
+        with contextlib.suppress(OSError):
+            stamp.unlink()  # release the claim so the next call can retry
         print(f"spawn-registry: ⚠️ detached sweep not started: {exc}", file=sys.stderr)
         return False
     return True
@@ -670,7 +707,7 @@ def collect_status(reg_dir: Any) -> Dict[str, Any]:
     return {
         "dir": str(d), "segments": len(_segments(d)),
         "live_bytes": live.stat().st_size if live.exists() else 0,
-        "rows": len(events), "skipped_rows": skipped, "spawns": spawn_n, "counts": tree["counts"],
+        "rows": len(events), "skipped_rows": skipped + tree["malformed_events"], "spawns": spawn_n, "counts": tree["counts"],
         "unbound_ratio": round(tree["counts"].get("unbound", 0) / spawn_n, 3) if spawn_n else 0.0,
         "write_failure_rate": round(fails / writes, 4) if writes else 0.0,
         "bind_ms_p95": _pct(m.get("bind_ms", []), 0.95),
@@ -805,7 +842,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _fail(f"bad --liveness-file: {exc}", 2)
         events, skipped = read_all(resolved.path)
         tree = build_tree(events, live)
-        tree["skipped_rows"] = skipped
+        tree["skipped_rows"] = skipped + tree["malformed_events"]
         print(json.dumps(tree) if args.json else render_tree(tree))
         return 0
     return 2
