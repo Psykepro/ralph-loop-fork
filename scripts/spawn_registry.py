@@ -734,12 +734,19 @@ def _sweep_failed(reg_dir: Path, msg: str) -> int:
 
 def _cmd_write(args: argparse.Namespace, build: Callable[[], Dict[str, Any]], emit: Optional[str] = None) -> int:
     t0 = time.perf_counter()
+    notice = "spawn-registry: disabled (rules.spawn-lineage=false or SPAWN_REGISTRY_DISABLE=1); nothing written"
+    try:
+        # kill-switch before dir resolution: a disabled registry must exit 0 even with bad settings/unwritable dir
+        if is_disabled(root=args.root):
+            print(notice, file=sys.stderr)
+            return 0
+    except RegistryConfigError:
+        pass  # unreadable settings: resolve below re-raises it loudly (env kill-switch already short-circuited)
     try:
         resolved = resolve_registry_dir(root=args.root)
         row = build()
         if is_disabled(root=resolved.root):
-            print("spawn-registry: disabled (rules.spawn-lineage=false or SPAWN_REGISTRY_DISABLE=1); nothing written",
-                  file=sys.stderr)
+            print(notice, file=sys.stderr)
             return 0
     except RegistryConfigError as exc:
         return _fail(str(exc), 2)
@@ -758,6 +765,8 @@ def _liveness_from_file(path: Optional[str]) -> Liveness:
     if not path:
         return None
     mapping = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(mapping, dict):
+        raise ValueError(f"top level is {type(mapping).__name__}, expected an object")
     return lambda sid: mapping.get(sid)
 
 
