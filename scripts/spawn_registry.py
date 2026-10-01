@@ -428,7 +428,7 @@ def _opt(v: Any, typ: Any) -> bool:
     return v is None or isinstance(v, typ)
 
 
-def _well_formed(e: Any) -> bool:
+def well_formed(e: Any) -> bool:
     """Field-shape check for the events build_tree reads; unknown `type`s pass (ignored by the fold)."""
     if not isinstance(e, dict) or not isinstance(e.get("spawn_id"), str):
         return False
@@ -454,7 +454,7 @@ def build_tree(events: List[Dict[str, Any]], liveness: Liveness) -> Dict[str, An
     spawns: Dict[str, Dict[str, Any]] = {}
     malformed = 0
     for e in events:
-        if not _well_formed(e):
+        if not well_formed(e):
             malformed += 1
             continue
         sid = e.get("spawn_id")
@@ -696,8 +696,8 @@ def collect_status(reg_dir: Any) -> Dict[str, Any]:
     tree_ms = (time.perf_counter() - t0) * 1000
     m: Dict[str, List[float]] = {}
     with contextlib.suppress(OSError):
-        for raw in (d / "metrics.jsonl").read_text(encoding="utf-8").splitlines():
-            with contextlib.suppress(ValueError, KeyError):
+        for raw in (d / "metrics.jsonl").read_text(encoding="utf-8", errors="replace").splitlines():
+            with contextlib.suppress(ValueError, KeyError, TypeError):
                 r = json.loads(raw)
                 m.setdefault(r["metric"], []).append(float(r["value"]))
     fails = len(m.get("write_failure", []))
