@@ -283,6 +283,7 @@ cleanup_current_session() {
     else
       debug_log "herdr pane for session $session_number not found or already removed"
     fi
+    _lp_cleanup "$pane_id"
     return 0
   fi
 
@@ -340,6 +341,7 @@ cleanup_ralph_sessions() {
       else
         debug_log "herdr pane already closed or not found: $target"
       fi
+      _lp_cleanup "$target"
     else
       if tmux kill-session -t "=$target" 2>/dev/null; then
         info "   Removed: $target"
@@ -554,6 +556,7 @@ else
         else
           log "Failed to remove or not found: $session_name"
         fi
+        _lp_cleanup "$pane_id"
       done < <(jq -r '.spawned_sessions[]? | [.name, (.pane_id // "")] | @tsv' "$STATE_FILE" 2>/dev/null)
     else
       # Remove spawned sessions (except last if preserve_final)
@@ -1225,6 +1228,9 @@ if command -v python3 >/dev/null 2>&1; then
 fi
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$(dirname "$0")")}"
+# Optional launch-profile helper: drops a closed pane's PATH shim (no-op without a project helper).
+source "$PLUGIN_ROOT/scripts/lib-launch-profile.sh" 2>/dev/null || true
+_lp_cleanup() { declare -F launch_profile_cleanup_pane >/dev/null && launch_profile_cleanup_pane "$1"; return 0; }
 
 # Check stop_hook_active to prevent infinite BLOCK cycles
 # NOTE: We still need to check for spawning even when stop_hook_active=true
