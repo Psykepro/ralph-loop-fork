@@ -16,6 +16,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 source "$PLUGIN_ROOT/scripts/lib-herdr-backend.sh"
 source "$PLUGIN_ROOT/scripts/lib-session-launch.sh"
 source "$PLUGIN_ROOT/scripts/lib-spawn-lineage.sh"
+source "$PLUGIN_ROOT/scripts/lib-launch-profile.sh"
 
 # Colors only when the stream is a real terminal (tmux attach, direct runs).
 # Captured output (Claude Code slash commands) shows raw escape bytes as
@@ -1072,6 +1073,7 @@ if [[ "$WORKTREE" == "true" ]]; then
     INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
     AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
 
+    launch_profile_begin "$WORKTREE_PATH_ABS" "$(pwd)" || exit 1   # before any pane or registry row exists
     spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$AGENT_NAME"
     herdr_spawn_root_pane "$WORKTREE_PATH_ABS" "$AGENT_NAME" || {
       _err "herdr pane spawn failed"
@@ -1085,6 +1087,12 @@ if [[ "$WORKTREE" == "true" ]]; then
     # this session), which would otherwise silently kill the spawned claude.
     herdr pane run "$PANE_ID" 'unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL' \
       || echo "⚠️  env sanitation pane run failed (non-fatal, continuing)" >&2
+
+    launch_profile_prepare_pane "$WORKTREE_PATH_ABS" "$PANE_ID" || {
+      herdr pane close "$PANE_ID" 2>/dev/null || true
+      spawn_lineage_abort launch_profile_failed
+      exit 1
+    }
 
     AGENT_START_OK=false
     for delay in 0 0.5 1 2; do
@@ -1100,6 +1108,7 @@ if [[ "$WORKTREE" == "true" ]]; then
     if [[ "$AGENT_START_OK" != "true" ]]; then
       _err "herdr agent start failed after retries"
       herdr pane close "$PANE_ID" 2>/dev/null || true
+      launch_profile_cleanup_pane "$PANE_ID"
       spawn_lineage_abort agent_start_failed
       exit 1
     fi

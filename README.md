@@ -534,6 +534,16 @@ Failures print one `⚠️  spawn-registry:` line and never block a spawn. Disab
 `SPAWN_REGISTRY_DISABLE=1`. If the registry lives outside the default locations, add its path to
 `progress_exclude` in `.aeos-config.json` so its writes are not read as loop progress.
 
+## Launch profile (optional, herdr backend)
+
+A project may ship `.claude/hooks/lib/launch_profile.py`. When that helper exists, every herdr launch
+(session 1 in worktree mode and each fork) asks it `plan <dir>` first and passes the answer on: the
+`env` pairs go onto the pane's `--env`, and the `command_prefix` runs ahead of `claude` through a
+PATH shim in a per-pane scratch dir (same idea as an account-wrapper alias). If the helper exits
+non-zero the spawn is refused with its message and nothing is created, so a session never starts
+under an unverified setup. No helper, no change in behavior. The shim dir is removed wherever the
+plugin closes the pane. The tmux backend does not use the helper. Test: `tests/test-launch-profile.sh`.
+
 ## Comparison with standard ralph-loop
 
 | Feature | `/ralph-loop` | `/ralph-loop-fork` |
@@ -589,6 +599,7 @@ ralph-loop-fork/
 │   ├── setup-worktree.sh            # Worktree creation + file population
 │   ├── fork-terminal.sh             # tmux fork spawner
 │   ├── lib-session-launch.sh        # Shared launch flags + iteration prompt text
+│   ├── lib-launch-profile.sh        # Optional project launch-profile helper (herdr)
 │   └── cancel-ralph-loop-fork.sh    # Cancel / list script
 ├── commands/
 │   ├── ralph-loop-fork.md           # Main command

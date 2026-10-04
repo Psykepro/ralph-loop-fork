@@ -23,6 +23,7 @@ ARCHIVE_DIR_NAME=".archive"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib-herdr-backend.sh
 source "$SCRIPT_DIR/lib-herdr-backend.sh"
+source "$SCRIPT_DIR/lib-launch-profile.sh"
 
 # ============================================================================
 # Dependency checks (soft — we degrade gracefully)
@@ -232,6 +233,7 @@ kill_herdr_session() {
   if herdr pane close "$pane_id" 2>/dev/null; then
     echo "  Closed herdr pane: $pane_id"
   fi
+  launch_profile_cleanup_pane "$pane_id"
 }
 
 # Close a herdr WORKSPACE by id — used only by the fallback enumeration

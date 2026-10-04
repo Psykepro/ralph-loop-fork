@@ -29,6 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib-herdr-backend.sh"
 source "$SCRIPT_DIR/lib-session-launch.sh"
 source "$SCRIPT_DIR/lib-spawn-lineage.sh"
+source "$SCRIPT_DIR/lib-launch-profile.sh"
 
 LOOP_DIR=".claude/ralph-fork/$LOOP_ID"
 STATE_FILE="$LOOP_DIR/state.json"
@@ -209,6 +210,7 @@ echo "Forking to new herdr agent: $AGENT_NAME"
 # ============================================================================
 # SPAWN via herdr socket-API
 # ============================================================================
+launch_profile_begin "$CWD" "$PROJECT_ROOT" || exit 1   # before any pane or registry row exists
 spawn_lineage_begin "$PROJECT_ROOT" "$LOOP_ID" "$SESSION_NUMBER" "$STATE_FILE" "$AGENT_NAME"
 herdr_spawn_root_pane "$CWD" "$AGENT_NAME" || exit 1
 # Row before `agent start`: the child's bind row must never precede its spawn row.
@@ -222,6 +224,13 @@ spawn_lineage_record "$PANE_ID" "$WS_ID"
 # start; RALPH_LOOP_ACTIVE (set via --env above) survives this unset.
 herdr pane run "$PANE_ID" 'unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL' \
   || echo "⚠️  env sanitation pane run failed (non-fatal, continuing)" >&2
+
+# Optional launch profile: wrapper command on PATH ahead of `claude`; a failure must not start the session.
+launch_profile_prepare_pane "$CWD" "$PANE_ID" || {
+  herdr pane close "$PANE_ID" 2>/dev/null || true
+  spawn_lineage_abort launch_profile_failed
+  exit 1
+}
 
 # agent_pane_busy retry: a pane's shell isn't always ready the instant
 # workspace create returns (live-reproduced, herdr-fork-terminal/SKILL.md's
@@ -243,6 +252,7 @@ if [[ "$AGENT_START_OK" != "true" ]]; then
   [[ -f "/tmp/herdr-agent-start-err.$$" ]] && cat "/tmp/herdr-agent-start-err.$$" >&2
   rm -f "/tmp/herdr-agent-start-err.$$"
   herdr pane close "$PANE_ID" 2>/dev/null || true
+  launch_profile_cleanup_pane "$PANE_ID"
   spawn_lineage_abort agent_start_failed
   exit 1
 fi
@@ -289,10 +299,13 @@ if [[ -n "$OLD_PANES" ]]; then
     echo "Scheduling cleanup of old herdr panes:$KILL_LIST"
     RALPH_LOG_DIR="${RALPH_FORK_LOG_DIR:-${TMPDIR:-/tmp}/ralph-fork-logs}"
     mkdir -p "$RALPH_LOG_DIR" 2>/dev/null || true
+    LP_CLEAN=""
+    [[ -n "$LP_HELPER" ]] && LP_CLEAN="python3 '$LP_HELPER' shim-cleanup \"\$p\" >/dev/null 2>&1 || true"
     ( nohup bash -c "
       sleep 5
       for p in $KILL_LIST; do
         herdr pane close \"\$p\" 2>&1 || echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] herdr pane close \$p FAILED\"
+        $LP_CLEAN
       done
     " </dev/null >>"$RALPH_LOG_DIR/herdr-cleanup.log" 2>&1 & )
   fi
