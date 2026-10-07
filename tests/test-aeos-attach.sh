@@ -1491,6 +1491,58 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo -e "${YELLOW}Test FP-notes: uncommitted Session-Notes-only checklist edit must not move the fingerprint (project root AND worktree)${NC}"
+FPN=$(mktemp -d -t aeos-fpnotes-XXXX); _CLEANUP_DIRS+=("$FPN")
+mkdir -p "$FPN/main/plan" "$FPN/wt/plan"
+for d in main wt; do
+  git -C "$FPN/$d" init -q
+  printf '# Plan\n- [ ] step\n' > "$FPN/$d/plan/M.md"
+  git -C "$FPN/$d" add -A >/dev/null 2>&1
+  git -C "$FPN/$d" -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+done
+echo '{}' > "$FPN/cfg.json"
+fpn() { bash "$STOP_HOOK" --fingerprint "$FPN/wt/plan/M.md" "$FPN/main" "$FPN/cfg.json" "$FPN/wt"; }
+FPN_A=$(fpn)
+printf '### Session 7 Notes\nblocked on owner decision\n' >> "$FPN/wt/plan/M.md"
+FPN_B=$(fpn)
+printf '### Session 8 Notes\nstill blocked, different text\n' >> "$FPN/wt/plan/M.md"
+FPN_C=$(fpn)
+if [[ -n "$FPN_A" && "$FPN_A" == "$FPN_B" && "$FPN_B" == "$FPN_C" ]]; then
+  pass "notes-only checklist edits leave the fingerprint unchanged"
+else
+  fail "notes-only checklist edit moved the fingerprint (every fork looks like progress)" "A=$FPN_A B=$FPN_B C=$FPN_C"
+fi
+printf '# Plan\n- [x] step\n### Session 8 Notes\nstill blocked, different text\n' > "$FPN/wt/plan/M.md"
+FPN_D=$(fpn)
+if [[ "$FPN_D" != "$FPN_C" ]]; then
+  pass "a real checklist content change still moves the fingerprint"
+else
+  fail "real checklist change no longer registers as progress" "C=$FPN_C D=$FPN_D"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test BLOCKER-hold: BLOCKER.md beside the checklist stops the loop instead of forking${NC}"
+for _case in clear blocked; do
+  TBL=$(mktemp -d -t aeos-blk-XXXX); _CLEANUP_DIRS+=("$TBL")
+  make_stop_fixture "$TBL" "blk-$_case" 0 "" 0 5 3 false
+  mkdir -p "$TBL/plan"; printf '# Plan\n- [ ] step\n' > "$TBL/plan/MASTER.md"
+  _st="$TBL/.claude/ralph-fork/blk-$_case/state.json"
+  jq --arg c "$TBL/plan/MASTER.md" '.checklist_file = $c' "$_st" > "$_st.tmp" && mv "$_st.tmp" "$_st"
+  [[ "$_case" == "blocked" ]] && echo "owner decision needed" > "$TBL/plan/BLOCKER.md"
+  run_stop_hook "$TBL" "blk-$_case" false >/dev/null
+  _act=$(state_field "$TBL" "blk-$_case" active); _why=$(state_field "$TBL" "blk-$_case" termination_reason)
+  if [[ "$_case" == "blocked" ]]; then
+    if [[ "$_act" == "false" && "$_why" == "owner_blocker_present" ]]; then pass "BLOCKER.md present: loop deactivated, no fork (reason=$_why)"
+    else fail "BLOCKER.md present but loop not stopped" "active=$_act reason=$_why"; fi
+  else
+    if [[ "$_why" != "owner_blocker_present" ]]; then pass "no BLOCKER.md: hold does not trigger"
+    else fail "hold triggered without a BLOCKER.md" "active=$_act reason=$_why"; fi
+  fi
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "========================================"
 echo "Test Results"
 echo "========================================"

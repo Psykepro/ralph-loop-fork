@@ -19,6 +19,9 @@
 - Every claude launch passes `$RALPH_DISALLOWED_TOOLS_ARG` in the `=` form (the flag is variadic; the space form eats the positional prompt). Guarded by `tests/test-wait-thrash-prevention.sh`.
 
 ## Changelog
+- 2026-10-07: v0.20.0 — stop hook now honors an owner BLOCKER.md beside the checklist (or at the worktree
+  root): loop deactivated (`owner_blocker_present`), no new fork. Doom fingerprint excludes the checklist
+  file from tree hashes so uncommitted Session-Notes writes no longer reset `stuck_count` every fork.
 - 2026-10-07: v0.19.0 — forked herdr sessions inherit the parent's account env (`RALPH_INHERIT_ENV`,
   default `CLDY_SESSION AEOS_LAUNCH_PROFILE CLAUDE_CONFIG_DIR`) with no project helper needed; a non-empty
   helper `env` replaces the inherited set (no per-key merge), empty = no opinion. Names-only stderr note.

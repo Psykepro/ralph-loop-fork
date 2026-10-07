@@ -1166,9 +1166,17 @@ compute_progress_fingerprint() {
   done
   # Intentional word-splitting on $pathspec: exclude entries are repo-relative,
   # space-free by contract (documented in README).
+  # The checklist is excluded from the tree hashes: its content already counts
+  # via component 1 (minus Session-N-Notes), and an uncommitted notes write
+  # would otherwise register as progress every fork and mask a blocked loop.
+  local ck_rel_main="" ck_rel_wt=""
+  if [[ -n "$checklist_path" ]]; then
+    [[ "$checklist_path" == "$project_root"/* ]] && ck_rel_main=":(exclude)${checklist_path#"$project_root"/}"
+    [[ -n "$worktree_path" && "$checklist_path" == "$worktree_path"/* ]] && ck_rel_wt=":(exclude)${checklist_path#"$worktree_path"/}"
+  fi
   # shellcheck disable=SC2086
-  comp=$( { git -C "$project_root" status --porcelain=v1 -- . $pathspec 2>/dev/null; \
-            git -C "$project_root" diff HEAD -- . $pathspec 2>/dev/null; } | hash_stdin ) || comp=""
+  comp=$( { git -C "$project_root" status --porcelain=v1 -- . $pathspec $ck_rel_main 2>/dev/null; \
+            git -C "$project_root" diff HEAD -- . $pathspec $ck_rel_main 2>/dev/null; } | hash_stdin ) || comp=""
   parts="$parts|tree:$comp"
 
   # 4) Declared external progress roots (work landing outside the project
@@ -1190,8 +1198,8 @@ compute_progress_fingerprint() {
     comp=$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null) || comp=""
     parts="$parts|wt-head:$comp"
     # shellcheck disable=SC2086
-    comp=$( { git -C "$worktree_path" status --porcelain=v1 -- . $pathspec 2>/dev/null; \
-              git -C "$worktree_path" diff HEAD -- . $pathspec 2>/dev/null; } | hash_stdin ) || comp=""
+    comp=$( { git -C "$worktree_path" status --porcelain=v1 -- . $pathspec $ck_rel_wt 2>/dev/null; \
+              git -C "$worktree_path" diff HEAD -- . $pathspec $ck_rel_wt 2>/dev/null; } | hash_stdin ) || comp=""
     parts="$parts|wt-tree:$comp"
   fi
 
@@ -1732,6 +1740,31 @@ if [[ $BG_PENDING -gt 0 ]]; then
   debug_log "RUNNING: $BG_PENDING pending background agents detected — deferring silently, no block"
   update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
   exit 0
+fi
+
+# ============================================================================
+# OWNER BLOCKER HOLD
+# A BLOCKER.md next to the checklist (or at the worktree root) means a session
+# declared an owner decision is needed. Forking another session just repeats
+# the blocked step, so deactivate instead; relaunch after clearing the file.
+# Skipped while the on-completion command runs (a stale file must not block it).
+# ============================================================================
+if [[ -n "$CHECKLIST_PATH" ]] && [[ "$(jq -r '.executing_on_completion // false' "$STATE_FILE" 2>/dev/null)" != "true" ]]; then
+  OWNER_BLOCKER=""
+  for _bdir in "$(dirname "$CHECKLIST_PATH")" "$(jq -r '.worktree_path // ""' "$STATE_FILE" 2>/dev/null)"; do
+    [[ -n "$_bdir" && -f "$_bdir/BLOCKER.md" ]] && { OWNER_BLOCKER="$_bdir/BLOCKER.md"; break; }
+  done
+  if [[ -n "$OWNER_BLOCKER" ]]; then
+    info "Ralph Loop Fork [$LOOP_ID]: OWNER BLOCKER present at $OWNER_BLOCKER — not forking a new session."
+    info "Clear the blocker, then relaunch the loop."
+    update_state "$STATE_FILE" ".active = false | .termination_reason = \"owner_blocker_present\" | .blocker_file = \"$OWNER_BLOCKER\""
+    emit_signal "ralph-doomed" "$(jq -nc --arg reason "owner_blocker_present" --arg file "$OWNER_BLOCKER" '{reason: $reason, blocker_file: $file}')"
+    SEQ=$(build_terminal_sequence "Ralph Loop Fork [$LOOP_ID]" "Owner blocker present — loop stopped")
+    jq -n --arg seq "$SEQ" '{"terminalSequence": $seq}'
+    debug_log "OWNER BLOCKER: $OWNER_BLOCKER — spawning detached cleanup, no fork"
+    run_cleanup_detached "$LOOP_ID" "$STATE_FILE" "false" "$NO_CLEANUP" "$LOOP_DIR" "$PROJECT_ROOT"
+    exit 0
+  fi
 fi
 
 # ============================================================================
