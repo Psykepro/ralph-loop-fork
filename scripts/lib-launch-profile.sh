@@ -6,7 +6,7 @@
 # A project MAY ship `.claude/hooks/lib/launch_profile.py`: a helper whose `plan <dir>` prints
 #   {"profile": ..., "env": {K: V}, "command_prefix": [...]}
 # so a spawned session gets the same account markers and wrapper command a human launch alias would add.
-# Absent helper => every function below is a no-op and launches behave exactly as before.
+# Absent helper => no profile/shim; only the parent-account env inheritance below applies.
 # Helper present but failing (e.g. unusable rule) => launch_profile_begin returns 1: refuse to spawn,
 # never fall back to a default account.
 #
@@ -28,10 +28,30 @@ _lp_find_helper() {
   return 1
 }
 
+# Copy the parent session's account env (CLDY_SESSION, CLAUDE_CONFIG_DIR, ...) into LP_HERDR_ENV so a
+# forked pane lands on the same account with no project helper. RALPH_INHERIT_ENV overrides the
+# default list (space/comma separated); set-but-empty disables. Prints names only, never values.
+_lp_inherit_env() {
+  local list="${RALPH_INHERIT_ENV-CLDY_SESSION AEOS_LAUNCH_PROFILE CLAUDE_CONFIG_DIR}" n val added=""
+  list="${list//,/ }"
+  for n in $list; do
+    if [[ ! "$n" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "⚠️ ralph-loop-fork: RALPH_INHERIT_ENV: skipping invalid name '$n'" >&2
+      continue
+    fi
+    val="${!n-}"
+    [[ -n "$val" ]] || continue
+    LP_HERDR_ENV+=(--env "$n=$val")
+    added="$added $n"
+  done
+  [[ -z "$added" ]] || echo "ℹ️ ralph-loop-fork: forked session inherits account env:$added" >&2
+  return 0
+}
+
 launch_profile_begin() {
   local cwd="$1" root="${2:-}" plan err
   LP_HELPER="" LP_HERDR_ENV=() LP_ACTIVE=""
-  LP_HELPER=$(_lp_find_helper "$cwd" "$root") || return 0
+  LP_HELPER=$(_lp_find_helper "$cwd" "$root") || { _lp_inherit_env; return 0; }
   err=$(mktemp "${TMPDIR:-/tmp}/lp-err.XXXXXX") || return 1
   if ! plan=$(python3 "$LP_HELPER" plan "$cwd" 2>"$err"); then
     echo "Error: launch profile refused the spawn:" >&2
@@ -41,9 +61,14 @@ launch_profile_begin() {
   fi
   rm -f "$err"
   local kv
-  while IFS= read -r kv; do
-    [[ -n "$kv" ]] && LP_HERDR_ENV+=(--env "$kv")
-  done < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' <<< "$plan")
+  # A non-empty helper env replaces the inherited set wholesale (never a per-key merge); empty = no opinion.
+  if [[ "$(jq -r '(.env // {}) | length' <<< "$plan")" -gt 0 ]]; then
+    while IFS= read -r kv; do
+      [[ -n "$kv" ]] && LP_HERDR_ENV+=(--env "$kv")
+    done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<< "$plan")
+  else
+    _lp_inherit_env
+  fi
   if [[ "$(jq -r '(.command_prefix // []) | length' <<< "$plan")" -gt 0 ]]; then
     LP_ACTIVE=1
   fi

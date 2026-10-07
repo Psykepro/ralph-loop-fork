@@ -544,6 +544,27 @@ non-zero the spawn is refused with its message and nothing is created, so a sess
 under an unverified setup. No helper, no change in behavior. The shim dir is removed wherever the
 plugin closes the pane. The tmux backend does not use the helper. Test: `tests/test-launch-profile.sh`.
 
+### Inheriting the parent session's account env (herdr, no helper needed)
+
+A forked pane starts a fresh shell, so it would otherwise land on the default Claude account. Before
+each herdr launch the plugin copies selected variables from the launching session's environment onto
+the pane's `--env` (values pass as single argv words, never eval'd or split) and prints one
+`ℹ️ ralph-loop-fork: forked session inherits account env: NAME ...` line (names only, never values).
+This works with no project helper present.
+
+- `RALPH_INHERIT_ENV` is a space- or comma-separated list of names. Unset means the default
+  `CLDY_SESSION AEOS_LAUNCH_PROFILE CLAUDE_CONFIG_DIR`; set but empty disables inheritance. Names must
+  match `^[A-Za-z_][A-Za-z0-9_]*$`; others are skipped with a stderr warning. Only variables that are set
+  and non-empty are copied, so a parent with none of them launches exactly as before.
+- With a launch-profile helper: a plan with a non-empty `env` REPLACES the inherited set entirely, never a
+  per-key merge (a merge could pair one account's marker with another account's config dir). A plan with
+  an empty or absent `env` means "no opinion" and the inherited set is kept. A failing helper still
+  refuses the spawn.
+- Markers such as `CLDY_SESSION` are labels; `CLAUDE_CONFIG_DIR` is what actually selects the account
+  (the default login has only the marker).
+
+Test: `tests/test-inherit-account-env.sh`.
+
 ## Comparison with standard ralph-loop
 
 | Feature | `/ralph-loop` | `/ralph-loop-fork` |
