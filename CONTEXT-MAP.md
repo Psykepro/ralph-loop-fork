@@ -11,7 +11,7 @@
 - `scripts/setup-ralph-loop-fork.sh` — entry point; resolves `--backend` (default `herdr` since v0.13.0), model/effort, worktree mode.
 - `scripts/fork-terminal-herdr.sh`, `scripts/lib-herdr-backend.sh` — herdr-backend spawn + shared agent-name derivation (sanitize+hash to fit herdr's `[a-z][a-z0-9_-]{0,31}` charset).
 - `scripts/lib-spawn-lineage.sh`, `scripts/spawn_registry.py`, `hooks/spawn-bind-hook.py`, `hooks/spawn-sweep-hook.py` — spawn lineage (fail-open; `spawn_registry.py` must stay byte-identical to the AEOS canonical module).
-- `scripts/lib-launch-profile.sh` — optional launch-profile hook for herdr launches: `launch_profile_begin` (refuses on helper failure, before any pane exists), `launch_profile_prepare_pane` (PATH shim), `launch_profile_cleanup_pane`; absent project helper = no-op.
+- `scripts/lib-launch-profile.sh` — optional launch-profile hook for herdr launches: `launch_profile_begin` (refuses on helper failure, before any pane exists), `launch_profile_prepare_pane` (PATH shim), `launch_profile_cleanup_pane`; absent project helper = no profile/shim. Also `_lp_inherit_env`: copies `RALPH_INHERIT_ENV` (default `CLDY_SESSION AEOS_LAUNCH_PROFILE CLAUDE_CONFIG_DIR`) set vars from the parent env onto `LP_HERDR_ENV`; a non-empty helper `env` replaces them.
 - `scripts/lib-session-launch.sh` — `RALPH_DISALLOWED_TOOLS_ARG` + `RALPH_PARALLEL_SUBAGENTS_TEXT`, shared by all 4 claude launch sites and 6 prompt variants.
 
 ## Rules
@@ -19,6 +19,10 @@
 - Every claude launch passes `$RALPH_DISALLOWED_TOOLS_ARG` in the `=` form (the flag is variadic; the space form eats the positional prompt). Guarded by `tests/test-wait-thrash-prevention.sh`.
 
 ## Changelog
+- 2026-10-07: v0.19.0 — forked herdr sessions inherit the parent's account env (`RALPH_INHERIT_ENV`,
+  default `CLDY_SESSION AEOS_LAUNCH_PROFILE CLAUDE_CONFIG_DIR`) with no project helper needed; a non-empty
+  helper `env` replaces the inherited set (no per-key merge), empty = no opinion. Names-only stderr note.
+  New `tests/test-inherit-account-env.sh`.
 - 2026-10-05: v0.18.0 — optional launch profile (herdr). When the project ships
   `.claude/hooks/lib/launch_profile.py`, session-1 (worktree mode) and fork launches add its `env` to the
   pane `--env` and run its `command_prefix` ahead of `claude` via a per-pane PATH shim; a failing helper
