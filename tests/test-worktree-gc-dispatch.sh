@@ -61,6 +61,10 @@ SPAWN_LOG="$TEST_DIR/spawn.log"
 cat > "$STUB_BIN/python3" <<'EOF'
 #!/bin/bash
 echo "python3 $* CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-<unset>} PWD=$PWD" >> "$SPAWN_LOG_FILE"
+if [[ "${FAIL_REG:-}" == "1" && "$*" == *aeos_proc.py* ]]; then
+  echo "boom: registry exploded" >&2
+  exit 1
+fi
 exit 0
 EOF
 chmod +x "$STUB_BIN/python3"
@@ -517,6 +521,101 @@ echo "worktree-gc Trigger 0 dispatch tests"
 echo "=============================================="
 echo ""
 
+# -----------------------------------------------------------------------------
+# Test 7: registry CLI present -> the helper is registered (label, waits-for
+# the session pane pid); dispatch still happens.
+# -----------------------------------------------------------------------------
+test_registry_present_registers_helper() {
+  echo -e "${YELLOW}Test 7: aeos_proc.py present -> helper registered${NC}"
+  rm -f "$SPAWN_LOG"
+  local loop_id="test-wtgc-reg-present"
+  local transcript_file
+  transcript_file=$(setup_test_env "$loop_id" "reg_present")
+  mkdir -p "$TEST_DIR/.claude/hooks/lib"
+  touch "$TEST_DIR/.claude/hooks/lib/aeos_proc.py"
+  create_state_file "$loop_id" "$TEST_DIR/nonexistent-checklist.md" \
+    "$TEST_DIR/.worktrees/$loop_id" "false" "ralph-$loop_id-1" "true" "false" "false"
+  create_local_file "$loop_id"
+  create_transcript "$transcript_file" "$loop_id" "moved"
+
+  local out
+  out=$(run_hook "$transcript_file" true)
+  sleep 1
+
+  assert_equals "1" "$(spawn_count)" "dispatch still happens with the registry present"
+  local reg_line
+  reg_line=$(grep -F "aeos_proc.py register" "$SPAWN_LOG" 2>/dev/null || true)
+  assert_contains "--label ralph-worktree-gc" "$reg_line" "registration carries the helper label"
+  assert_contains "--kind helper" "$reg_line" "registration carries kind=helper"
+  assert_contains "--waits-for-pid 88888" "$reg_line" "registration waits for the session pane pid"
+  assert_contains "CLAUDE_PROJECT_DIR=$TEST_DIR" "$reg_line" "registration is rooted at the main checkout"
+  assert_equals "0" "$(echo "$out" | grep -c 'process registry')" "no registry warning on the success path"
+
+  rm -f "$TEST_DIR/.claude/hooks/lib/aeos_proc.py"
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test 8: registry CLI absent -> exactly one stderr line, dispatch + exit
+# status unchanged.
+# -----------------------------------------------------------------------------
+test_registry_absent_one_warning() {
+  echo -e "${YELLOW}Test 8: aeos_proc.py absent -> one stderr line, behavior unchanged${NC}"
+  rm -f "$SPAWN_LOG"
+  local loop_id="test-wtgc-reg-absent"
+  local transcript_file
+  transcript_file=$(setup_test_env "$loop_id" "reg_absent")
+  rm -f "$TEST_DIR/.claude/hooks/lib/aeos_proc.py"
+  create_state_file "$loop_id" "$TEST_DIR/nonexistent-checklist.md" \
+    "$TEST_DIR/.worktrees/$loop_id" "false" "ralph-$loop_id-1" "true" "false" "false"
+  create_local_file "$loop_id"
+  create_transcript "$transcript_file" "$loop_id" "moved"
+
+  local out rc=0
+  local input_json
+  input_json=$(jq -n --arg t "$transcript_file" '{"stop_hook_active": true, "transcript_path": $t}')
+  out=$(cd "$TEST_DIR" && echo "$input_json" | bash "$HOOK_SCRIPT" 2>&1) || rc=$?
+  sleep 1
+
+  assert_equals "1" "$(spawn_count)" "dispatch still happens without the registry"
+  assert_equals "1" "$(echo "$out" | grep -c 'process registry unavailable')" "exactly one registry warning line"
+  assert_equals "0" "$(grep -cF 'aeos_proc.py register' "$SPAWN_LOG" 2>/dev/null || true)" "no registration attempted"
+  assert_equals "0" "$rc" "hook exit status unchanged (0)"
+
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Test 9: registry CLI present but failing -> one stderr line, exit unchanged.
+# -----------------------------------------------------------------------------
+test_registry_failure_fail_open() {
+  echo -e "${YELLOW}Test 9: aeos_proc.py fails -> one stderr line, behavior unchanged${NC}"
+  rm -f "$SPAWN_LOG"
+  local loop_id="test-wtgc-reg-fail"
+  local transcript_file
+  transcript_file=$(setup_test_env "$loop_id" "reg_fail")
+  mkdir -p "$TEST_DIR/.claude/hooks/lib"
+  touch "$TEST_DIR/.claude/hooks/lib/aeos_proc.py"
+  create_state_file "$loop_id" "$TEST_DIR/nonexistent-checklist.md" \
+    "$TEST_DIR/.worktrees/$loop_id" "false" "ralph-$loop_id-1" "true" "false" "false"
+  create_local_file "$loop_id"
+  create_transcript "$transcript_file" "$loop_id" "moved"
+
+  local out rc=0
+  local input_json
+  input_json=$(jq -n --arg t "$transcript_file" '{"stop_hook_active": true, "transcript_path": $t}')
+  out=$(cd "$TEST_DIR" && echo "$input_json" | FAIL_REG=1 bash "$HOOK_SCRIPT" 2>&1) || rc=$?
+  sleep 1
+
+  assert_equals "1" "$(spawn_count)" "dispatch still happens when registration fails"
+  assert_equals "1" "$(echo "$out" | grep -c 'process registry call failed')" "exactly one registry warning line"
+  assert_contains "boom: registry exploded" "$out" "warning carries the registry's own error"
+  assert_equals "0" "$rc" "hook exit status unchanged (0)"
+
+  rm -f "$TEST_DIR/.claude/hooks/lib/aeos_proc.py"
+  echo ""
+}
+
 test_checklist_moved_dispatches
 test_dispatch_forces_main_root_project_dir
 test_dispatch_forces_main_root_cwd
@@ -527,6 +626,9 @@ test_completed_no_checklist_dispatches
 test_orphaned_ineligible_no_dispatch
 test_double_fire_single_dispatch
 test_budget_exhausted_no_dispatch
+test_registry_present_registers_helper
+test_registry_absent_one_warning
+test_registry_failure_fail_open
 
 echo "=============================================="
 echo "Test Results"
