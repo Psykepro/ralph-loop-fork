@@ -18,6 +18,8 @@
 - Plugin version bumps (`plugin.json`) + `scripts/sync-live-install.py` on every hook/script change — see host CLAUDE.md "AEOS-Only Rules".
 - Every claude launch passes `$RALPH_DISALLOWED_TOOLS_ARG` in the `=` form (the flag is variadic; the space form eats the positional prompt). Guarded by `tests/test-wait-thrash-prevention.sh`.
 
+- 2026-10-09: v0.21.0 — `dispatch_worktree_gc` registers the detached worktree-gc helper with the AEOS process
+  registry (`aeos_proc.py register`, waits for the session pane pid); fail-open, one stderr line if absent/failing.
 ## Changelog
 - 2026-10-07: v0.20.0 — stop hook now honors an owner BLOCKER.md beside the checklist (or at the worktree
   root): loop deactivated (`owner_blocker_present`), no new fork. Doom fingerprint excludes the checklist
