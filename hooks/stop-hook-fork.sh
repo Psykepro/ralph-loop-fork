@@ -753,7 +753,32 @@ dispatch_worktree_gc() {
   # on cwd alone with no pid awareness (round-9 zero-issue-loop Reliability
   # HIGH): the row classifies DEFERRED forever, the PRIMARY trigger never
   # reclaims, and the tmux session leaks permanently with zero signal.
-  ( cd "$main_root" && CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & disown )
+  local helper_pid
+  helper_pid=$( cd "$main_root" && { CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & echo $!; } )
+  register_gc_helper "$main_root" "$helper_pid" "$pane_pid"
+}
+
+# Record the detached GC helper in the AEOS process registry. Fail-open: a
+# missing registry CLI or a failed call prints ONE stderr line and returns 0,
+# never changing the hook's exit behavior.
+register_gc_helper() {
+  local main_root="$1" helper_pid="$2" pane_pid="$3"
+  local proc_cli="$main_root/.claude/hooks/lib/aeos_proc.py"
+  if [[ ! -f "$proc_cli" ]]; then
+    echo "[ralph-loop-fork] WARN: process registry unavailable ($proc_cli absent), worktree-gc helper unregistered" >&2
+    return 0
+  fi
+  if [[ ! "$helper_pid" =~ ^[0-9]+$ ]]; then
+    echo "[ralph-loop-fork] WARN: process registry skipped, could not capture worktree-gc helper pid" >&2
+    return 0
+  fi
+  local err
+  if ! err=$(CLAUDE_PROJECT_DIR="$main_root" python3 "$proc_cli" register --pid "$helper_pid" \
+      --label ralph-worktree-gc --kind helper --lifetime per-command \
+      --waits-for-pid "$pane_pid" --note "detached worktree teardown helper" 2>&1 >/dev/null); then
+    echo "[ralph-loop-fork] WARN: process registry call failed, worktree-gc helper unregistered: $(echo "$err" | tail -1)" >&2
+  fi
+  return 0
 }
 
 # ============================================================================
