@@ -98,6 +98,7 @@ if [[ "$DOOM_THRESHOLD" =~ ^[0-9]+$ ]] && [[ "$STUCK_COUNT" =~ ^[0-9]+$ ]] \
    && [[ "$DOOM_THRESHOLD" -gt 0 ]] && [[ "$STUCK_COUNT" -ge 1 ]]; then
   STUCK_BANNER="⚠️ NO-PROGRESS WARNING ($STUCK_COUNT of $DOOM_THRESHOLD strikes): the last $STUCK_COUNT session(s) ended with NO observable progress — no commit, no working-tree change, no checklist tick. At $DOOM_THRESHOLD strikes the loop TERMINATES.
 FIRST ACTION THIS SESSION: land the close-out for any already-finished work — commit it, mark completed checklist items [x], append the handoff-log entry — BEFORE starting new work. If work landed outside this repo, tick + handoff NOW so progress becomes visible.
+If you are genuinely blocked (unmet dependency, owner decision), write BLOCKER.md next to the checklist (a Condition line and a Detail line) and stop; notes alone do not stop the loop.
 
 "
 fi

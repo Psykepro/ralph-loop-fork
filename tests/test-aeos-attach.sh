@@ -485,6 +485,12 @@ else
   fail "doom-loop stage1: expected last-chance block" "$(echo "$OUT5A" | head -5)"
 fi
 
+if echo "$OUT5A" | grep -q "BLOCKER.md" && ! echo "$OUT5A" | grep -qi "checklist session notes"; then
+  pass "doom-loop stage1: last-chance text names BLOCKER.md, not the checklist session notes"
+else
+  fail "doom-loop stage1: last-chance text must direct a blocked session to BLOCKER.md" "$(echo "$OUT5A" | head -5)"
+fi
+
 if [[ "$(state_field "$T5" "doom-t5" "doom_warning_issued")" == "true" ]]; then
   pass "doom-loop stage1: doom_warning_issued=true persisted"
 else

@@ -15,6 +15,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FORK_SCRIPT="$SCRIPT_DIR/scripts/fork-terminal-herdr.sh"
 LIB="$SCRIPT_DIR/scripts/lib-launch-profile.sh"
 
+# Ambient spawn-registry vars (set when run from a registered session) would be
+# forwarded as --env flags and break the baseline-flags comparison.
+unset SPAWN_REGISTRY_DIR SPAWN_ID SPAWN_PARENT_SESSION_ID SPAWN_PARENT_NAME
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 TESTS_PASSED=0; TESTS_FAILED=0
 pass() { echo -e "${GREEN}✓ PASS${NC}: $1"; TESTS_PASSED=$((TESTS_PASSED + 1)); }

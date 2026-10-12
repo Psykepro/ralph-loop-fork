@@ -1098,26 +1098,45 @@ hash_stdin() {
 }
 
 # Strips mandatory "### Session N Notes" sections (header line through the
-# next "### " heading, exclusive) out of checklist content before hashing.
-# Without this, the per-session notes write alone changes component 1 every
-# round, masking a genuinely stuck loop (owner-blocked step, e.g. waiting
-# across sessions for an SSO login) as "progress".
+# next "#"/"##"/"###" heading, exclusive) out of checklist content before
+# counting ticks. Without this, ticked-looking lines a session copies into its
+# notes would register as progress every round and mask a genuinely stuck loop.
 strip_session_notes() {
   awk '
     /^### Session [0-9]+ Notes/ { skip=1; next }
-    /^### / { skip=0 }
+    /^(# |## |### )/ { skip=0 }
     !skip { print }
   ' "$1"
 }
 
+# Number of ticked items across the plan dir (the checklist's directory, flat):
+# "- [x]"/"- [X]" lines plus "🟢 completed" status rows, notes sections
+# excluded. Prints the count (0 is valid); non-zero exit = error (caller fails
+# open to an empty component). A monotone tick count moves only on real
+# checklist progress, unlike a content hash that any edit moves.
+count_plan_ticks() {
+  local plan_dir="$1" f total=0 n
+  [[ -d "$plan_dir" ]] || return 1
+  while IFS= read -r -d '' f; do
+    n=$(strip_session_notes "$f" | awk '
+      /^[[:space:]]*[-*][[:space:]]+\[[xX]\]/ { c++ }
+      index($0, "🟢 completed") { c++ }
+      END { print c + 0 }') || return 1
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    total=$((total + n))
+  done < <(find "$plan_dir" -maxdepth 1 -type f -name '*.md' -print0 2>/dev/null)
+  printf '%s' "$total"
+}
+
 # Walks commits back from HEAD and returns the SHA of the latest one whose
-# diff touches a path other than checklist_path or one of the volatile
-# excludes (relative to project_root; same list as component 3's tree diff —
-# hook-appended jsonl, loop state under .claude/ralph-fork). A commit that
-# ONLY changes the checklist and/or those excluded paths is mandatory
+# diff touches a path other than checklist_path, a CONTEXT-MAP.md at any depth
+# (mandatory changelog), or one of the volatile excludes (relative to
+# project_root; same list as component 3's tree diff — hook-appended jsonl,
+# loop state under .claude/ralph-fork). A commit that
+# ONLY changes the checklist and/or those bookkeeping paths is mandatory
 # per-session bookkeeping (the notes write, the hook's own state.json
-# update) — counting it as "progress" has the same masking effect as the raw
-# checklist hash in component 1, just via git HEAD instead. Falls back to
+# update) — counting it as "progress" masks a stuck loop the same way a
+# raw checklist hash would, just via git HEAD. Falls back to
 # empty (contributes nothing) if no such commit exists in range, or the root
 # isn't a git repo.
 find_last_non_checklist_commit() {
@@ -1140,6 +1159,7 @@ find_last_non_checklist_commit() {
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
       [[ "$line" == "$rel" ]] && continue
+      [[ "${line##*/}" == "CONTEXT-MAP.md" ]] && continue
       is_excluded=0
       for ex in $excludes; do
         if [[ "$line" == "$ex" ]] || [[ "$line" == "$ex"/* ]]; then
@@ -1160,10 +1180,10 @@ compute_progress_fingerprint() {
   local checklist_path="$1" project_root="$2" aeos_config="$3" worktree_path="${4:-}"
   local parts="" comp=""
 
-  # 1) Checklist content, minus Session-N-Notes sections (see
-  #    strip_session_notes) — a notes-only edit must not register as progress.
+  # 1) Tick count across the plan dir (see count_plan_ticks) — only a ticked
+  #    item or completed row is checklist progress; notes/rewording are not.
   if [[ -n "$checklist_path" ]] && [[ -f "$checklist_path" ]]; then
-    comp=$(strip_session_notes "$checklist_path" | hash_stdin) || comp=""
+    comp=$(count_plan_ticks "$(dirname "$checklist_path")") || comp=""
     parts="checklist:$comp"
   fi
 
@@ -1189,10 +1209,13 @@ compute_progress_fingerprint() {
   for e in $excludes; do
     pathspec="$pathspec :(exclude)$e"
   done
+  # CONTEXT-MAP.md at any depth is bookkeeping (kept as an array: unquoted
+  # word-splitting would glob-expand the "**").
+  local -a bookkeeping_spec=(":(exclude,glob)**/CONTEXT-MAP.md")
   # Intentional word-splitting on $pathspec: exclude entries are repo-relative,
   # space-free by contract (documented in README).
-  # The checklist is excluded from the tree hashes: its content already counts
-  # via component 1 (minus Session-N-Notes), and an uncommitted notes write
+  # The checklist is excluded from the tree hashes: its ticks already count
+  # via component 1, and an uncommitted notes write
   # would otherwise register as progress every fork and mask a blocked loop.
   local ck_rel_main="" ck_rel_wt=""
   if [[ -n "$checklist_path" ]]; then
@@ -1200,8 +1223,8 @@ compute_progress_fingerprint() {
     [[ -n "$worktree_path" && "$checklist_path" == "$worktree_path"/* ]] && ck_rel_wt=":(exclude)${checklist_path#"$worktree_path"/}"
   fi
   # shellcheck disable=SC2086
-  comp=$( { git -C "$project_root" status --porcelain=v1 -- . $pathspec $ck_rel_main 2>/dev/null; \
-            git -C "$project_root" diff HEAD -- . $pathspec $ck_rel_main 2>/dev/null; } | hash_stdin ) || comp=""
+  comp=$( { git -C "$project_root" status --porcelain=v1 -- . $pathspec "${bookkeeping_spec[@]}" $ck_rel_main 2>/dev/null; \
+            git -C "$project_root" diff HEAD -- . $pathspec "${bookkeeping_spec[@]}" $ck_rel_main 2>/dev/null; } | hash_stdin ) || comp=""
   parts="$parts|tree:$comp"
 
   # 4) Declared external progress roots (work landing outside the project
@@ -1220,11 +1243,21 @@ compute_progress_fingerprint() {
   #    otherwise invisible — false strikes on a healthy loop. HEAD + tree,
   #    same volatile excludes as the project tree.
   if [[ -n "$worktree_path" ]] && [[ "$worktree_path" != "$project_root" ]] && [[ -d "$worktree_path" ]]; then
-    comp=$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null) || comp=""
+    # Same bookkeeping-aware walk as component 2 (a raw HEAD moves on every
+    # notes commit); the checklist is mapped to its worktree-relative path.
+    local ck_for_wt=""
+    if [[ -n "$checklist_path" ]]; then
+      if [[ "$checklist_path" == "$worktree_path"/* ]]; then
+        ck_for_wt="$checklist_path"
+      elif [[ "$checklist_path" == "$project_root"/* ]]; then
+        ck_for_wt="$worktree_path/${checklist_path#"$project_root"/}"
+      fi
+    fi
+    comp=$(find_last_non_checklist_commit "$worktree_path" "$ck_for_wt" "$excludes") || comp=""
     parts="$parts|wt-head:$comp"
     # shellcheck disable=SC2086
-    comp=$( { git -C "$worktree_path" status --porcelain=v1 -- . $pathspec $ck_rel_wt 2>/dev/null; \
-              git -C "$worktree_path" diff HEAD -- . $pathspec $ck_rel_wt 2>/dev/null; } | hash_stdin ) || comp=""
+    comp=$( { git -C "$worktree_path" status --porcelain=v1 -- . $pathspec "${bookkeeping_spec[@]}" $ck_rel_wt 2>/dev/null; \
+              git -C "$worktree_path" diff HEAD -- . $pathspec "${bookkeeping_spec[@]}" $ck_rel_wt 2>/dev/null; } | hash_stdin ) || comp=""
     parts="$parts|wt-tree:$comp"
   fi
 
@@ -1862,7 +1895,7 @@ if [[ -f "$AEOS_CONFIG_FILE" ]]; then
             --argjson t "$AEOS_DOOM_THRESHOLD" \
             '{
               "decision": "block",
-              "reason": ("Ralph Loop [\($loopid)]: ⛔ DOOM-LOOP LAST CHANCE — \($n) consecutive session forks produced NO observable progress (no commit, no working-tree change, no checklist tick). The loop TERMINATES at the next stop unless real state moves. Do these NOW, in order: (1) commit any finished work in this repo; (2) mark every completed checklist item [x] and append the handoff-log entry; (3) if your work landed outside this repo (another git repo, an external system), tick + handoff NOW so it becomes visible, and note the external location in the handoff entry. If you are genuinely blocked, write the blocker into the checklist session notes instead. Do NOT output the completion promise unless it is true."),
+              "reason": ("Ralph Loop [\($loopid)]: ⛔ DOOM-LOOP LAST CHANCE — \($n) consecutive session forks produced NO observable progress (no commit, no working-tree change, no checklist tick). The loop TERMINATES at the next stop unless real state moves. Do these NOW, in order: (1) commit any finished work in this repo; (2) mark every completed checklist item [x] and append the handoff-log entry; (3) if your work landed outside this repo (another git repo, an external system), tick + handoff NOW so it becomes visible, and note the external location in the handoff entry. If you are genuinely blocked (e.g. an unmet dependency or an owner decision), write BLOCKER.md next to the checklist with a Condition line and a Detail line, then stop — notes writes do not count as progress and do not stop the loop. Do NOT output the completion promise unless it is true."),
               "systemMessage": ("Ralph [\($loopid)]: doom-loop last chance — \($n)/\($t) stuck forks, terminate on next no-progress stop")
             }'
           exit 0

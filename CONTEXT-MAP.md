@@ -1,9 +1,9 @@
 | path | type | LOC | summary | refs | used-by | entry | hot |
 |---|---|---|---|---|---|---|---|
-| hooks/ | dir | ~2600 | Stop-hook state machine (fork on stop, defer silently on pending bg agents, block on promise / doom-loop); dual-backend cleanup dispatch (tmux kill-session vs herdr pane close) branches on state.json's `backend` field; doom-loop fingerprint excludes Session-N-Notes-only churn | jq, tmux, herdr, git | Claude Code Stop hook config | hooks/stop-hook-fork.sh | yes |
+| hooks/ | dir | ~2600 | Stop-hook state machine (fork on stop, defer silently on pending bg agents, block on promise / doom-loop); dual-backend cleanup dispatch (tmux kill-session vs herdr pane close) branches on state.json's `backend` field; doom-loop fingerprint = plan-dir tick count + HEAD/tree with every CONTEXT-MAP.md and the checklist treated as bookkeeping | jq, tmux, herdr, git | Claude Code Stop hook config | hooks/stop-hook-fork.sh | yes |
 | scripts/ | dir | ~3400 | Setup/fork/cancel/init helpers + live-install sync, dual-backend (tmux default until 2026-08-11, now herdr default / `--backend tmux` opt-out) | tmux, herdr, jq, git | hooks/, commands/ | scripts/setup-ralph-loop-fork.sh | yes |
 | commands/ | dir | small | Slash-command docs for ralph-loop-fork, help, init, cancel | - | Claude Code CLI | commands/ralph-loop-fork.md | no |
-| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends; `test-spawn-lineage.sh` covers lineage rows, SPAWN_* env, bind/sweep hooks, fingerprint exclusion | jq | CI / manual runs | - | no |
+| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends; `test-spawn-lineage.sh` covers lineage rows, SPAWN_* env, bind/sweep hooks, fingerprint exclusion; `test-progress-fingerprint.sh` covers tick-count progress + CONTEXT-MAP.md bookkeeping | jq | CI / manual runs | - | no |
 | _project/ | dir | - | AEOS project scaffolding carried into this plugin repo | - | - | - | no |
 
 ## Key Exports
@@ -21,6 +21,16 @@
 - 2026-10-09: v0.21.0 — `dispatch_worktree_gc` registers the detached worktree-gc helper with the AEOS process
   registry (`aeos_proc.py register`, waits for the session pane pid); fail-open, one stderr line if absent/failing.
 ## Changelog
+- 2026-10-12: v0.22.0 — doom-loop progress fingerprint no longer counts bookkeeping as progress. Component 1
+  is now a tick count (`- [x]`/`- [X]` lines + `🟢 completed` rows, Session Notes excluded) across the
+  checklist's directory instead of a content hash; every `CONTEXT-MAP.md` at any depth is bookkeeping in
+  `find_last_non_checklist_commit` (basename match) and the working-tree pathspec
+  (`:(exclude,glob)**/CONTEXT-MAP.md`); the worktree HEAD component uses the same bookkeeping-aware walk
+  instead of raw `HEAD`. Cause: a loop writing only notes + mandatory root CONTEXT-MAP.md changelog commits
+  (48 of 50 commits) never tripped the detector. Last-chance warning now tells a genuinely blocked session
+  to write `BLOCKER.md` next to the checklist, not session notes. New `tests/test-progress-fingerprint.sh`;
+  `test-inherit-account-env.sh` unsets ambient `SPAWN_*` vars. A fingerprint change resets `stuck_count`
+  once on running loops. See `hooks/stop-hook-fork.sh`.
 - 2026-10-07: v0.20.0 — stop hook now honors an owner BLOCKER.md beside the checklist (or at the worktree
   root): loop deactivated (`owner_blocker_present`), no new fork. Doom fingerprint excludes the checklist
   file from tree hashes so uncommitted Session-Notes writes no longer reset `stuck_count` every fork.
