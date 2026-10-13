@@ -3,7 +3,7 @@
 | hooks/ | dir | ~2600 | Stop-hook state machine (fork on stop, defer silently on pending bg agents, block on promise / doom-loop); dual-backend cleanup dispatch (tmux kill-session vs herdr pane close) branches on state.json's `backend` field; doom-loop fingerprint = plan-dir tick count + HEAD/tree with every CONTEXT-MAP.md and the checklist treated as bookkeeping | jq, tmux, herdr, git | Claude Code Stop hook config | hooks/stop-hook-fork.sh | yes |
 | scripts/ | dir | ~3400 | Setup/fork/cancel/init helpers + live-install sync, dual-backend (tmux default until 2026-08-11, now herdr default / `--backend tmux` opt-out) | tmux, herdr, jq, git | hooks/, commands/ | scripts/setup-ralph-loop-fork.sh | yes |
 | commands/ | dir | small | Slash-command docs for ralph-loop-fork, help, init, cancel | - | Claude Code CLI | commands/ralph-loop-fork.md | no |
-| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends; `test-spawn-lineage.sh` covers lineage rows, SPAWN_* env, bind/sweep hooks, fingerprint exclusion; `test-progress-fingerprint.sh` covers tick-count progress + CONTEXT-MAP.md bookkeeping | jq | CI / manual runs | - | no |
+| tests/ | dir | - | Shell test suite for hook + scripts, hermetic stubs for both backends; `test-spawn-lineage.sh` covers lineage rows, SPAWN_* env, bind/sweep hooks, fingerprint exclusion; `test-progress-fingerprint.sh` covers tick-count progress + CONTEXT-MAP.md bookkeeping; `test-aeos-attach.sh` Test 23 drives the full doom state machine over notes-only vs productive fork sequences | jq | CI / manual runs | - | no |
 | _project/ | dir | - | AEOS project scaffolding carried into this plugin repo | - | - | - | no |
 
 ## Key Exports
@@ -21,6 +21,12 @@
 - 2026-10-09: v0.21.0 — `dispatch_worktree_gc` registers the detached worktree-gc helper with the AEOS process
   registry (`aeos_proc.py register`, waits for the session pane pid); fail-open, one stderr line if absent/failing.
 ## Changelog
+- 2026-10-13: v0.22.1 — tests only, no hook change. `tests/test-aeos-attach.sh` Test 23 drives the real
+  Stop hook fork by fork (threshold 3, loop and work in one tree, and loop in the primary with the work in a
+  linked worktree): 47 forks of notes + root CONTEXT-MAP.md commits get one last-chance block at fork 4
+  (baseline fork + 3 strikes) and BLOCKER.md at fork 5; a stall after progress is warned on the 3rd stalled
+  fork and terminated on the 4th; productive runs (tick/code every 3rd fork, notes stretches of at most 2) are
+  never warned. Red on v0.21.0 (12 assertions), green on v0.22.0+.
 - 2026-10-12: v0.22.0 — doom-loop progress fingerprint no longer counts bookkeeping as progress. Component 1
   is now a tick count (`- [x]`/`- [X]` lines + `🟢 completed` rows, Session Notes excluded) across the
   checklist's directory instead of a content hash; every `CONTEXT-MAP.md` at any depth is bookkeeping in

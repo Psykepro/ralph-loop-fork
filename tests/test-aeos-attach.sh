@@ -1548,6 +1548,159 @@ for _case in clear blocked; do
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Test 23: stall guard end to end. A loop whose every fork is a notes commit
+# plus the mandatory root CONTEXT-MAP.md changelog edit (a blocked plan) must
+# reach the last-chance block and then BLOCKER.md within a bounded number of
+# forks; a loop that ticks or commits code must never be warned. Drives the
+# real hook state machine (not just --fingerprint) fork by fork, in both
+# topologies: loop and work in one tree, and loop in the primary with the work
+# in a linked worktree (state.worktree_path).
+# Origin: a blocked plan ran 48 notes-only forks to the budget (47 here) and the
+# breaker never fired, because the root CONTEXT-MAP.md edit moved the fingerprint.
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Test 23: stall guard end to end (notes + CONTEXT-MAP.md forks trip the breaker; productive runs never do)${NC}"
+
+STALL_N_ITEMS=60
+stall_checklist() {
+  echo "# Checklist"
+  local i
+  for i in $(seq 1 "$STALL_N_ITEMS"); do echo "- [ ] item-$i"; done
+}
+
+# Fork-end actions, run in the work tree $1 for fork $2. Each one mirrors what a
+# real session commits: its notes, the mandatory CONTEXT-MAP.md changelog entry,
+# plus the action's own change.
+stall_commit() {
+  local wd="$1" n="$2" msg="$3" ck
+  ck="$wd/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md"
+  printf '\n### Session %s Notes\nPhase 2 still blocked on a dependency.\n' "$n" >> "$ck"
+  printf 'changelog %s\n' "$n" >> "$wd/CONTEXT-MAP.md"
+  git -C "$wd" add -A
+  git -C "$wd" commit -q -m "$msg $n"
+}
+stall_act_notes() { stall_commit "$1" "$2" "session notes"; }
+stall_act_tick() {
+  local ck="$1/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md"
+  local body; body=$(<"$ck")
+  printf '%s\n' "${body/- \[ \] item-$2$'\n'/- [x] item-$2$'\n'}" > "$ck"
+  stall_commit "$1" "$2" "tick item"
+}
+stall_act_code() { mkdir -p "$1/src"; echo "v$2" > "$1/src/mod-$2.py"; stall_commit "$1" "$2" "code change"; }
+
+# stall_fixture <label> <topology>: sets STALL_ROOT (loop dir), STALL_WORK (where
+# sessions commit), STALL_ID. Threshold 3, no pre-seeded fingerprint (loop start).
+stall_fixture() {
+  local label="$1" topo="$2"
+  STALL_ID="stall-$label"
+  STALL_ROOT=$(mktemp -d -t aeos-t23-XXXX); _CLEANUP_DIRS+=("$STALL_ROOT")
+  make_stop_fixture "$STALL_ROOT" "$STALL_ID" 0 "" 0 5 3 false
+  stall_checklist > "$STALL_ROOT/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md"
+  printf '# Map\nchangelog 0\n' > "$STALL_ROOT/CONTEXT-MAP.md"
+  git_fixture "$STALL_ROOT"
+  STALL_WORK="$STALL_ROOT"
+  if [[ "$topo" == "worktree" ]]; then
+    local wt_parent; wt_parent=$(mktemp -d -t aeos-t23wt-XXXX); _CLEANUP_DIRS+=("$wt_parent")
+    STALL_WORK="$wt_parent/wt"
+    git -C "$STALL_ROOT" worktree add -q -b stall-wt "$STALL_WORK"
+    local st="$STALL_ROOT/.claude/ralph-fork/$STALL_ID/state.json"
+    jq --arg wt "$STALL_WORK" --arg ck "$STALL_WORK/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md" \
+      '.worktree_path = $wt | .checklist_file = $ck' "$st" > "$st.tmp" && mv "$st.tmp" "$st"
+  fi
+}
+
+# stall_drive <nforks> <action_fn_for_fork>: <action_fn_for_fork> n prints the
+# action name for fork n. Sets WARN_FORK / KILL_FORK (empty = never), MAX_STUCK,
+# WARN_COUNT (forks that received a last-chance block).
+stall_drive() {
+  local nforks="$1" chooser="$2" n act out
+  WARN_FORK=""; KILL_FORK=""; MAX_STUCK=0; WARN_COUNT=0
+  for n in $(seq 1 "$nforks"); do
+    bump_fork_session "$STALL_ROOT" "$STALL_ID" "$n"
+    act=$($chooser "$n")
+    "stall_act_$act" "$STALL_WORK" "$n"
+    out=$(run_stop_hook "$STALL_ROOT" "$STALL_ID" false)
+    if echo "$out" | grep -q "LAST CHANCE"; then
+      WARN_COUNT=$((WARN_COUNT + 1)); [[ -z "$WARN_FORK" ]] && WARN_FORK="$n"
+    fi
+    local sc; sc=$(state_field "$STALL_ROOT" "$STALL_ID" stuck_count)
+    [[ "$sc" =~ ^[0-9]+$ && "$sc" -gt "$MAX_STUCK" ]] && MAX_STUCK="$sc"
+    # BLOCKER.md is written synchronously at termination; state.json is archived
+    # by the detached cleanup a moment later, so it cannot be the detector.
+    # A terminated loop gets no further forks, so the drive stops there too.
+    if [[ -f "$STALL_ROOT/BLOCKER.md" ]]; then KILL_FORK="$n"; break; fi
+  done
+}
+
+chooser_all_notes() { echo notes; }
+# Two productive forks (a tick, then a code commit), then a blocked plan.
+chooser_productive_then_stall() { case "$1" in 1) echo tick ;; 2) echo code ;; *) echo notes ;; esac; }
+# Realistic healthy run: a tick or code commit every third fork at most, with
+# notes-only stretches of up to two forks in between (a review wait).
+chooser_healthy() { case $(( $1 % 3 )) in 0) echo tick ;; 1) echo notes ;; 2) echo code ;; esac; }
+# Same, but the notes-only stretch is two forks long, then one productive fork.
+chooser_healthy_slow() { case $(( $1 % 3 )) in 0) echo code ;; *) echo notes ;; esac; }
+
+for _topo in single worktree; do
+  # ── (1) the incident shape: 47 forks from loop start, threshold 3 ──
+  stall_fixture "all-notes-$_topo" "$_topo"
+  stall_drive 47 chooser_all_notes
+  # Fork 1 records the baseline fingerprint; forks 2-4 are strikes 1-3; the 3rd
+  # strike (fork 4) gets the last-chance block; the next fork (5) terminates.
+  if [[ "$WARN_FORK" == "4" && "$WARN_COUNT" == "1" ]]; then
+    pass "[$_topo] 47 notes+CONTEXT-MAP.md forks: single last-chance block at fork 4 (3rd strike after the baseline fork)"
+  else
+    fail "[$_topo] notes-only stall: expected exactly one last-chance block at fork 4" "warn_fork='$WARN_FORK' warn_count=$WARN_COUNT"
+  fi
+  if [[ "$KILL_FORK" == "5" ]]; then
+    pass "[$_topo] 47 notes+CONTEXT-MAP.md forks: BLOCKER.md and termination at fork 5, not at the 47-fork budget"
+  else
+    fail "[$_topo] notes-only stall: expected deactivation at fork 5" "kill_fork='$KILL_FORK'"
+  fi
+  _ev="$STALL_ROOT/_project/signals/events.jsonl"
+  _doomed=$(jq -rs '[.[] | select(.kind=="ralph-doomed" and .payload.reason=="doom_loop_detected")] | length' "$_ev" 2>/dev/null)
+  _warned=$(jq -rs '[.[] | select(.kind=="ralph-stuck-warning")] | length' "$_ev" 2>/dev/null)
+  if [[ "$_doomed" == "1" && "$_warned" == "1" ]]; then
+    pass "[$_topo] exactly one ralph-stuck-warning and one ralph-doomed(doom_loop_detected) signal"
+  else
+    fail "[$_topo] signals: expected 1 warning + 1 doomed row" "doomed=$_doomed warned=$_warned"
+  fi
+  if [[ -f "$STALL_ROOT/BLOCKER.md" ]] && grep -q 'Condition:\*\* doom-loop-detected' "$STALL_ROOT/BLOCKER.md"; then
+    pass "[$_topo] BLOCKER.md written at the project root with Condition doom-loop-detected"
+  else
+    fail "[$_topo] BLOCKER.md missing or wrong condition" "$(cat "$STALL_ROOT/BLOCKER.md" 2>&1 | head -3)"
+  fi
+  if [[ "$MAX_STUCK" == "4" ]]; then
+    pass "[$_topo] stuck_count: 3 strikes at the last-chance block, 4 at the terminating fork"
+  else
+    fail "[$_topo] stuck_count peak is not threshold+1" "max_stuck=$MAX_STUCK"
+  fi
+
+  # ── (2) stall that starts after productive forks: strike 3 is the 3rd stalled fork ──
+  stall_fixture "after-work-$_topo" "$_topo"
+  stall_drive 12 chooser_productive_then_stall
+  # Forks 1-2 move the fingerprint (baseline carried by fork 2); stalled forks 3,4,5
+  # are strikes 1-3, so the 3rd stalled fork (5) is warned and the 4th (6) terminates.
+  if [[ "$WARN_FORK" == "5" && "$KILL_FORK" == "6" ]]; then
+    pass "[$_topo] stall after progress: last-chance on the 3rd stalled fork (5), BLOCKER on the 4th (6)"
+  else
+    fail "[$_topo] stall after progress: expected warn=5 kill=6" "warn_fork='$WARN_FORK' kill_fork='$KILL_FORK'"
+  fi
+
+  # ── (3) productive runs never trip ──
+  for _ch in chooser_healthy chooser_healthy_slow; do
+    stall_fixture "healthy-$_ch-$_topo" "$_topo"
+    stall_drive 24 "$_ch"
+    _ticked=$(grep -c '^- \[x\]' "$STALL_WORK/_project/progress/in-progress/test-plan/MASTER-CHECKLIST.md")
+    if [[ -z "$WARN_FORK" && -z "$KILL_FORK" && "$MAX_STUCK" -lt 3 && "$(state_field "$STALL_ROOT" "$STALL_ID" active)" == "true" && ! -f "$STALL_ROOT/BLOCKER.md" ]]; then
+      pass "[$_topo] productive run ($_ch, 24 forks, $_ticked ticked): never warned, never terminated, max stuck_count=$MAX_STUCK"
+    else
+      fail "[$_topo] productive run tripped the breaker ($_ch)" "warn='$WARN_FORK' kill='$KILL_FORK' max_stuck=$MAX_STUCK active=$(state_field "$STALL_ROOT" "$STALL_ID" active)"
+    fi
+  done
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
 echo "Test Results"
