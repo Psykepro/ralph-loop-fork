@@ -21,6 +21,7 @@
 - 2026-10-09: v0.21.0 — `dispatch_worktree_gc` registers the detached worktree-gc helper with the AEOS process
   registry (`aeos_proc.py register`, waits for the session pane pid); fail-open, one stderr line if absent/failing.
 ## Changelog
+- 2026-10-14: v0.23.0 — the launch model/effort honour the owner's untracked dashboard overrides: `setup-ralph-loop-fork.sh` overlays the project's own `.claude/hooks/lib/config_overrides.py` when present (inert and tracked-file-only when absent or unusable). `spawn_registry.py` is untouched and stays byte-identical to the AEOS canonical copy.
 - 2026-10-13: v0.22.1 — tests only, no hook change. `tests/test-aeos-attach.sh` Test 23 drives the real
   Stop hook fork by fork (threshold 3, loop and work in one tree, and loop in the primary with the work in a
   linked worktree): 47 forks of notes + root CONTEXT-MAP.md commits get one last-chance block at fork 4

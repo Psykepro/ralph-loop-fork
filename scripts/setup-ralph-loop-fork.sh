@@ -56,6 +56,22 @@ _valid_effort_enum() {
 }
 _is_dated_model_id() { [[ "$1" =~ ^claude-.+-[0-9]{8}(\[.*\])?$ ]]; }
 
+# The project's settings as its hooks see them: the tracked file with the owner's untracked dashboard overrides laid over
+# it (the project's own lib/config_overrides.py). Falls back to the tracked file when that lib or python3 is absent.
+_aeos_effective_settings() {
+  local file="$1" lib="$AEOS_PROJECT_ROOT/.claude/hooks/lib/config_overrides.py"
+  if [[ -f "$lib" ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$lib" "$AEOS_PROJECT_ROOT" "$file" 2>/dev/null <<'PY' && return 0
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("aeos_config_overrides", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(json.dumps(mod.overlay(json.load(open(sys.argv[3])), "project", sys.argv[2])[0]))
+PY
+  fi
+  cat "$file"
+}
+
 MODEL_SOURCE="default"
 EFFORT_SOURCE="default"
 
@@ -69,9 +85,11 @@ resolve_model_effort() {
   # falls through rather than failing the loop.
   local aeos_file="$AEOS_PROJECT_ROOT/_project/project-settings.json"
   if [[ -f "$aeos_file" ]]; then
+    local aeos_json
+    aeos_json=$(_aeos_effective_settings "$aeos_file")
     if [[ -z "$MODEL" ]]; then
       local aeos_model
-      aeos_model=$(jq -r '.model_policy.implementation.model // empty' "$aeos_file" 2>/dev/null) || aeos_model=""
+      aeos_model=$(printf '%s' "$aeos_json" | jq -r '.model_policy.implementation.model // empty' 2>/dev/null) || aeos_model=""
       if [[ -n "$aeos_model" ]]; then
         if _valid_model_charset "$aeos_model"; then
           MODEL="$aeos_model"
@@ -86,7 +104,7 @@ resolve_model_effort() {
     fi
     if [[ -z "$EFFORT" ]]; then
       local aeos_effort
-      aeos_effort=$(jq -r '.model_policy.implementation.effort // empty' "$aeos_file" 2>/dev/null) || aeos_effort=""
+      aeos_effort=$(printf '%s' "$aeos_json" | jq -r '.model_policy.implementation.effort // empty' 2>/dev/null) || aeos_effort=""
       if [[ -n "$aeos_effort" ]]; then
         if _valid_effort_enum "$aeos_effort"; then
           EFFORT="$aeos_effort"
