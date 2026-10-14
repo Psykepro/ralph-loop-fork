@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
-import importlib.util
 import json
 import os
 import re
@@ -121,21 +120,6 @@ class Resolved:
         return {"dir": str(self.path), "source": self.source, "root": str(self.root) if self.root else None}
 
 
-def _owner_overrides(data: Dict[str, Any], root: Path) -> Dict[str, Any]:
-    """`data` with the owner's untracked UI overrides laid over it, via the project's own `lib/config_overrides.py`
-    (this file is vendored into the ralph plugin, so it cannot import it); no such lib in the project = no overrides."""
-    lib = root / ".claude" / "hooks" / "lib" / "config_overrides.py"
-    if not lib.is_file():
-        return data
-    try:
-        spec = importlib.util.spec_from_file_location("spawn_registry_config_overrides", lib)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.overlay(data, "project", root, closed=True)[0]
-    except Exception as exc:  # noqa: BLE001 — a damaged override file is loud, never silently ignored
-        raise RegistryConfigError(f"owner config overrides for {root} unusable: {exc}") from exc
-
-
 def _read_settings(root: Path) -> Dict[str, Any]:
     for rel in ("_project/project-settings.json", ".claude/ralph-fork/config.json"):
         p = root / rel
@@ -146,7 +130,7 @@ def _read_settings(root: Path) -> Dict[str, Any]:
                 raise RegistryConfigError(f"malformed settings {p}: {exc}") from exc
             if not isinstance(data, dict):
                 raise RegistryConfigError(f"malformed settings {p}: top level is not an object")
-            return _owner_overrides(data, root) if rel.startswith("_project/") else data
+            return data
     return {}
 
 

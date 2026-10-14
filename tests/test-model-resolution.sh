@@ -225,33 +225,6 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-echo -e "${YELLOW}P1 AEOS: the project's owner-override layer wins over the tracked file${NC}"
-D=$(new_project p1override)
-write_aeos_policy "$D" '"sonnet"' '"medium"'
-mkdir -p "$D/.claude/hooks/lib"
-# stand-in for the project's lib/config_overrides.py: overlay(data, source, root) -> (data', warnings)
-cat > "$D/.claude/hooks/lib/config_overrides.py" <<'PY'
-def overlay(data, source, root=None, closed=False):
-    data["model_policy"]["implementation"]["model"] = "opus"
-    return data, []
-PY
-run_setup "$D" overrideloop >/dev/null 2>&1
-M=$(state_field "$D" overrideloop model); E=$(state_field "$D" overrideloop effort)
-if [[ "$M" == "opus" && "$E" == "medium" ]]; then
-  pass "an override from the project's config_overrides.py reaches the launch model; untouched keys keep the tracked value"
-else
-  fail "override layer reaches the loop" "opus/medium" "$M/$E"
-fi
-echo "def overlay(d, s, r=None, closed=False): raise RuntimeError('unusable')" > "$D/.claude/hooks/lib/config_overrides.py"
-run_setup "$D" brokenoverrideloop >/dev/null 2>&1
-M=$(state_field "$D" brokenoverrideloop model)
-if [[ "$M" == "sonnet" ]]; then
-  pass "an unusable override layer falls back to the tracked file instead of failing the loop"
-else
-  fail "broken override layer" "sonnet" "$M"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
 echo -e "${YELLOW}config.json does not collide with the loop-dir glob (*/state.json)${NC}"
 D=$(new_project collision)
 write_project_config "$D" '{"model":"opus"}'
