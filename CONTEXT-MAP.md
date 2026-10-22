@@ -21,6 +21,7 @@
 - 2026-10-09: v0.21.0 — `dispatch_worktree_gc` registers the detached worktree-gc helper with the AEOS process
   registry (`aeos_proc.py register`, waits for the session pane pid); fail-open, one stderr line if absent/failing.
 ## Changelog
+- 2026-10-22: v0.24.0 — a loop can no longer park forever on `awaiting_background_agents` with no agent running. The legacy transcript matcher only counts agents launched within `RALPH_BG_AGENT_WINDOW_MIN` (default 45), and consecutive defers with an unchanged pending set reach `RALPH_BG_AGENT_MAX_DEFERS` (default 2) → loud stderr line, flag cleared, `bg_agent_override_reason` recorded in state.json, loop forks (documented fail-open). New state field `bg_agent_pending_sig`. Tests 13-18 in `tests/test-background-agent-detection.sh`.
 - 2026-10-14: v0.23.0 — the launch model/effort honour the owner's untracked dashboard overrides: `setup-ralph-loop-fork.sh` overlays the project's own `.claude/hooks/lib/config_overrides.py` when present (inert and tracked-file-only when absent or unusable). `spawn_registry.py` is untouched and stays byte-identical to the AEOS canonical copy.
 - 2026-10-13: v0.22.1 — tests only, no hook change. `tests/test-aeos-attach.sh` Test 23 drives the real
   Stop hook fork by fork (threshold 3, loop and work in one tree, and loop in the primary with the work in a

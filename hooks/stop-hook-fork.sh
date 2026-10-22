@@ -47,6 +47,11 @@ info() {
 # LOG ROTATION
 # ============================================================================
 LOG_RETENTION_DAYS="${RALPH_LOG_RETENTION_DAYS:-90}"
+# Background-agent park bounds: legacy-matcher age window (min) and the number
+# of consecutive unchanged-set defers before fail-open override.
+BG_AGENT_WINDOW_MIN="${RALPH_BG_AGENT_WINDOW_MIN:-45}"
+BG_AGENT_MAX_DEFERS="${RALPH_BG_AGENT_MAX_DEFERS:-2}"
+BG_OVERRIDE="false"
 # Log directory is configurable via RALPH_FORK_LOG_DIR; defaults to
 # ${TMPDIR:-/tmp}/ralph-fork-logs for portability across macOS and Linux.
 LOG_DIR="${RALPH_FORK_LOG_DIR:-${TMPDIR:-/tmp}/ralph-fork-logs}"
@@ -853,14 +858,22 @@ count_pending_background_agents() {
 
   # Collect IDs of background Agent tool_use calls from assistant messages
   local bg_ids
+  # Only agents launched within BG_AGENT_WINDOW_MIN count: an older one whose
+  # notification never landed (compaction, killed task, resumed session) would
+  # otherwise park the loop forever. A line without a timestamp stays pending.
+  local window_s=$((BG_AGENT_WINDOW_MIN * 60))
   bg_ids=$(grep '"role":"assistant"' "$transcript" 2>/dev/null | \
-    jq -r '
+    jq -r --argjson w "$window_s" '
+      (.timestamp // null) as $ts |
+      (if $ts == null then 0
+       else (try (now - ($ts | sub("\\.[0-9]+"; "") | fromdateiso8601)) catch 0) end) as $age |
       .message.content[]? |
       select(
         .type == "tool_use" and
         .name == "Agent" and
         (.input.run_in_background == true)
       ) |
+      select($age <= $w) |
       .id
     ' 2>/dev/null | sort -u) || bg_ids=""
 
@@ -918,6 +931,39 @@ count_undelivered_notifications() {
   local count
   count=$(tail -n +"$((last_assistant_line + 1))" "$transcript" 2>/dev/null | grep -c 'task-notification') || count=0
   echo "$count"
+}
+
+# Pending-set fingerprint: lets the defer logic tell "same agents still there"
+# (stuck) from "set changed" (progress). Native ids + legacy ids + undelivered count.
+bg_pending_signature() {
+  local hook_input="$1" transcript="$2"
+  {
+    echo "$hook_input" | jq -r '(.background_tasks // [])[]? | (.id // .task_id // "task")' 2>/dev/null
+    echo "undelivered:$(count_undelivered_notifications "$transcript")"
+    [[ "$(echo "$hook_input" | jq -r 'has("background_tasks")' 2>/dev/null)" != "true" ]] \
+      && count_pending_background_agents "$transcript"
+  } | sort | cksum | cut -d' ' -f1
+}
+
+# Escalation: defers with an unchanged pending set reach BG_AGENT_MAX_DEFERS →
+# fail-open (clear the flag, fork). Updates state; sets BG_OVERRIDE=true when
+# overriding so the RUNNING gate does not re-park. Not called via $(...) -
+# the globals must survive.
+bg_defer_or_override() {
+  local sig prev_sig prev_count new_count
+  sig=$(bg_pending_signature "$HOOK_INPUT" "$TRANSCRIPT_PATH")
+  prev_sig=$(jq -r '.bg_agent_pending_sig // ""' "$STATE_FILE" 2>/dev/null)
+  prev_count=$BG_AGENT_BLOCK_COUNT
+  if [[ -n "$prev_sig" && "$prev_sig" != "$sig" ]]; then new_count=1; else new_count=$((prev_count + 1)); fi
+  if [[ $new_count -ge $BG_AGENT_MAX_DEFERS ]]; then
+    local reason="pending background set unchanged for $new_count consecutive stop-hook fires (cap $BG_AGENT_MAX_DEFERS); no notification arrived - assumed lost, forking anyway"
+    info "Ralph Loop Fork [$LOOP_ID]: BG-AGENT OVERRIDE - $reason"
+    debug_log "BG AGENTS OVERRIDE: $reason (sig=$sig)"
+    update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0 | .bg_agent_pending_sig = null | .bg_agent_override_reason = \"$reason\""
+    AWAITING_BACKGROUND_AGENTS="false"; BG_AGENT_BLOCK_COUNT=0; BG_OVERRIDE="true"
+    return 0
+  fi
+  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = $new_count | .bg_agent_pending_sig = \"$sig\""
 }
 
 compute_pending_background_work() {
@@ -1683,10 +1729,13 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     debug_log "CONTINUATION: awaiting_background_agents=true - re-checking"
     PENDING_BG_CONT=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
     if [[ $PENDING_BG_CONT -gt 0 ]]; then
-      NEW_BG_COUNT=$((BG_AGENT_BLOCK_COUNT + 1))
-      update_state "$STATE_FILE" ".bg_agent_block_count = $NEW_BG_COUNT"
-      debug_log "BG AGENTS: Still $PENDING_BG_CONT pending (defer #$NEW_BG_COUNT) - deferring silently, no block"
-      exit 0
+      bg_defer_or_override
+      if [[ "$BG_OVERRIDE" == "true" ]]; then
+        debug_log "BG AGENTS: override in continuation - resuming normal flow"
+      else
+        debug_log "BG AGENTS: Still $PENDING_BG_CONT pending - deferring silently, no block"
+        exit 0
+      fi
     else
       debug_log "BG AGENTS: All resolved in continuation cycle — resuming normal flow"
       update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0"
@@ -1794,9 +1843,10 @@ fi
 # No cap — waits for all agents regardless of how many were started.
 # ============================================================================
 BG_PENDING=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
+[[ "$BG_OVERRIDE" == "true" ]] && BG_PENDING=0
 if [[ $BG_PENDING -gt 0 ]]; then
   debug_log "RUNNING: $BG_PENDING pending background agents detected — deferring silently, no block"
-  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1"
+  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1 | .bg_agent_pending_sig = \"$(bg_pending_signature "$HOOK_INPUT" "$TRANSCRIPT_PATH")\""
   exit 0
 fi
 

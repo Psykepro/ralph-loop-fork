@@ -340,6 +340,8 @@ Every time a session tries to exit, the stop hook fires and decides what to do:
 
 **Background sub-agents.** While sub-agents launched by the session are still pending, the stop hook defers silently: it does not fork, and it does not hold the session open. The session ends its turn, and each task notification re-invokes it. Loop sessions are spawned with `--disallowedTools=ScheduleWakeup`, and the iteration prompt tells them to end the turn instead of polling. Without this, sessions have been observed spending about half their tokens re-scheduling wakeups. For a genuine timed wait on external work, use a single `Bash` command with `run_in_background`.
 
+**Bounded wait (v0.24.0).** A pending-agent deferral cannot park a loop forever. The transcript matcher ignores agents launched more than `RALPH_BG_AGENT_WINDOW_MIN` minutes ago (default 45), and when the stop hook fires `RALPH_BG_AGENT_MAX_DEFERS` times in a row (default 2) with an unchanged pending set, it logs a `BG-AGENT OVERRIDE` line to stderr, clears `awaiting_background_agents`, records the reason in state.json `bg_agent_override_reason`, and forks the next session. This is a deliberate fail-open: a lost task notification costs at most one early fork, not an hour of dead loop.
+
 ### Session tokens and hook isolation
 
 This is the mechanism that makes parallel loops and long multi-session runs

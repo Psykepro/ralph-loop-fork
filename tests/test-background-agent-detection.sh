@@ -235,7 +235,7 @@ make_local "$LOOP"
 T=$(mktemp "$TEST_DIR/t5.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 2 0 "Still waiting for agents"
 
-OUTPUT=$(run_hook "$LOOP" "$T" true)
+OUTPUT=$(RALPH_BG_AGENT_MAX_DEFERS=50 run_hook "$LOOP" "$T" true)
 if [[ -z "$OUTPUT" ]]; then
   pass "Correctly re-defers in continuation cycle for still-pending agents"
 else
@@ -273,16 +273,16 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "Test 7: High wait count (e.g. 10) with agents still pending → still re-defers (no cap)"
+section "Test 7: High wait count (10) below a raised cap (50) → still re-defers"
 LOOP="test-bg-7"
 make_state "$LOOP" true 10
 make_local "$LOOP"
 T=$(mktemp "$TEST_DIR/t7.XXXXXX.jsonl")
 make_transcript "$T" "$LOOP" 4 0 "Still waiting, no cap"
 
-OUTPUT=$(run_hook "$LOOP" "$T" true)
+OUTPUT=$(RALPH_BG_AGENT_MAX_DEFERS=50 run_hook "$LOOP" "$T" true)
 if [[ -z "$OUTPUT" ]]; then
-  pass "Correctly re-defers even at high wait count (no cap) — waits for all agents"
+  pass "Correctly re-defers even at high wait count (cap raised) — waits for all agents"
 else
   fail "Expected continued silent re-defer at high wait count, got: $OUTPUT"
 fi
@@ -374,6 +374,86 @@ if [[ -n "$BG_LINE" ]] && [[ -n "$DOOM_LINE" ]] && [[ "$BG_LINE" -lt "$DOOM_LINE
   pass "BG-pending gate (line $BG_LINE) precedes AEOS doom-loop block (line $DOOM_LINE)"
 else
   fail "Expected BG-pending gate before doom-loop block, got BG=$BG_LINE DOOM=$DOOM_LINE"
+fi
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stale-park regression (INC: loop parked forever, awaiting_background_agents
+# true with no agent running). Transcript lines carry a top-level timestamp.
+make_stale_transcript() {
+  local file="$1" loop_id="$2" age_min="$3"
+  local ts
+  ts=$(jq -nr --argjson m "$age_min" '(now - $m*60) | todate')
+  {
+    echo '{"timestamp":"'"$ts"'","message":{"role":"assistant","content":[{"type":"text","text":"RALPH LOOP CONTEXT (Loop: '"$loop_id"', Session 1, Token: '"$TEST_TOKEN"'): x"},{"type":"tool_use","id":"toolu_old001","name":"Agent","input":{"description":"r","run_in_background":true}}]}}'
+    echo '{"timestamp":"'"$ts"'","message":{"role":"assistant","content":[{"type":"text","text":"launched"}]}}'
+  } > "$file"
+}
+state_field() { jq -r "$2" "$TEST_DIR/.claude/ralph-fork/$1/state.json"; }
+
+section "Test 13: legacy matcher, agent launched 3h ago with no notification → NOT pending (outside window)"
+LOOP="test-bg-13"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t13.XXXXXX.jsonl"); make_stale_transcript "$T" "$LOOP" 180
+run_hook "$LOOP" "$T" false >/dev/null || true
+if [[ "$(state_field $LOOP '.awaiting_background_agents')" != "true" ]]; then
+  pass "Stale agent (180 min) does not park the loop"
+else
+  fail "Stale agent parked the loop: awaiting_background_agents=true"
+fi
+
+section "Test 14: legacy matcher, agent launched 5 min ago → still pending (inside window)"
+LOOP="test-bg-14"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t14.XXXXXX.jsonl"); make_stale_transcript "$T" "$LOOP" 5
+OUTPUT=$(run_hook "$LOOP" "$T" false)
+if [[ -z "$OUTPUT" && "$(state_field $LOOP '.awaiting_background_agents')" == "true" ]]; then
+  pass "Fresh agent (5 min) defers"
+else
+  fail "Fresh agent should defer; out=[$OUTPUT] awaiting=$(state_field $LOOP '.awaiting_background_agents')"
+fi
+
+section "Test 15: window is configurable (RALPH_BG_AGENT_WINDOW_MIN=2, agent 5 min old → not pending)"
+LOOP="test-bg-15"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t15.XXXXXX.jsonl"); make_stale_transcript "$T" "$LOOP" 5
+RALPH_BG_AGENT_WINDOW_MIN=2 run_hook "$LOOP" "$T" false >/dev/null || true
+if [[ "$(state_field $LOOP '.awaiting_background_agents')" != "true" ]]; then
+  pass "Configured window honoured"
+else
+  fail "Configured window ignored"
+fi
+
+section "Test 16: continuation, SAME pending set at defer #2 (default cap 2) → override: clear flag, record reason, no silent park"
+LOOP="test-bg-16"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t16.XXXXXX.jsonl"); make_transcript "$T" "$LOOP" 0 0 "waiting"
+BT='[{"id":"a1","type":"subagent","status":"running"}]'
+run_hook "$LOOP" "$T" false "$BT" >/dev/null || true       # first defer: sets sig, count=1
+OUT2=$(run_hook "$LOOP" "$T" true "$BT" 2>&1 || true)       # second fire, unchanged set
+if [[ "$(state_field $LOOP '.awaiting_background_agents')" == "false" ]] \
+   && [[ -n "$(state_field $LOOP '.bg_agent_override_reason // ""')" ]]; then
+  pass "Unchanged pending set escalates: flag cleared, bg_agent_override_reason set"
+else
+  fail "No escalation: awaiting=$(state_field $LOOP '.awaiting_background_agents') reason=$(state_field $LOOP '.bg_agent_override_reason')"
+fi
+
+section "Test 17: continuation, pending set CHANGED between fires → no escalation (progress), count resets"
+LOOP="test-bg-17"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t17.XXXXXX.jsonl"); make_transcript "$T" "$LOOP" 0 0 "waiting"
+run_hook "$LOOP" "$T" false '[{"id":"a1","type":"subagent","status":"running"}]' >/dev/null || true
+OUT2=$(run_hook "$LOOP" "$T" true '[{"id":"a2","type":"subagent","status":"running"}]' 2>/dev/null || true)
+if [[ -z "$OUT2" && "$(state_field $LOOP '.awaiting_background_agents')" == "true" && "$(state_field $LOOP '.bg_agent_block_count')" == "1" ]]; then
+  pass "Changed set keeps deferring with count reset to 1"
+else
+  fail "Changed set mishandled: out=[$OUT2] count=$(state_field $LOOP '.bg_agent_block_count')"
+fi
+
+section "Test 18: override emits a loud stderr line"
+LOOP="test-bg-18"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t18.XXXXXX.jsonl"); make_transcript "$T" "$LOOP" 0 0 "waiting"
+run_hook "$LOOP" "$T" false "$BT" >/dev/null || true
+LOUD=$(cd "$TEST_DIR" && CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$HOOK_SCRIPT" <<< "$(jq -n --arg tp "$T" --argjson bt "$BT" '{transcript_path:$tp,stop_hook_active:true,background_tasks:$bt}')" 2>&1 >/dev/null || true)
+if echo "$LOUD" | grep -qi "bg.agent.*override\|override.*background"; then
+  pass "Loud override line on stderr"
+else
+  fail "No loud override line; stderr=[$LOUD]"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
