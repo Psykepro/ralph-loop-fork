@@ -58,6 +58,7 @@ cat > "$STUB_DIR/herdr" <<'STUBH'
   done
   printf '\n'
 } >> "$STUB_CALL_LOG"
+if [[ "$1 $2" == "agent list" && -n "${STUB_AGENT_LIST:-}" ]]; then cat "$STUB_AGENT_LIST"; fi
 exit 0
 STUBH
 chmod +x "$STUB_DIR/herdr"
@@ -152,6 +153,57 @@ if grep -q "wC:p1" "$CALL_LOG" && ! grep -q "wD:p1" "$CALL_LOG"; then
 else
   fail "preserve_final semantics wrong for herdr backend" "$(cat "$CALL_LOG" 2>/dev/null)"
 fi
+
+echo -e "${YELLOW}Test: panes missing from state.json (lost record / original herdr session) are swept by label+cwd${NC}"
+
+: > "$CALL_LOG"
+cat > "$STATE_FILE" <<EOF
+{
+  "loop_id": "cleanuptest3",
+  "active": true,
+  "backend": "herdr",
+  "original_session_name": "ralph-cleanuptest3-1-aaaaaa",
+  "spawned_sessions": [
+    {"name": "ralph-cleanuptest3-2-bbbbbb", "pane_id": "wB:p1", "session_number": 2, "spawned_at": "2026-08-09T00:01:00Z"}
+  ]
+}
+EOF
+AGENT_LIST="$WORK_DIR/agent-list.json"
+cat > "$AGENT_LIST" <<EOF
+{"result":{"agents":[
+ {"name":"ralph-cleanuptest3-1-aaaaaa","pane_id":"wO:p1","cwd":"$WORK_DIR"},
+ {"name":"ralph-cleanuptest3-2-bbbbbb","pane_id":"wB:p1","cwd":"$WORK_DIR"},
+ {"name":"ralph-cleanuptest3-3-cccccc","pane_id":"wLOST:p1","cwd":"$WORK_DIR"},
+ {"name":"ralph-cleanuptest3-9-dddddd","pane_id":"wFG:p1","cwd":"/elsewhere","foreground_cwd":"$WORK_DIR"},
+ {"name":"ralph-cleanuptest3-4-eeeeee","pane_id":"wOTHER:p1","cwd":"/some/other/project"},
+ {"name":"ralph-cleanuptest3x-1-ffffff","pane_id":"wSIB:p1","cwd":"$WORK_DIR"},
+ {"name":"unrelated-agent","pane_id":"wU:p1","cwd":"$WORK_DIR"}
+]}}
+EOF
+export STUB_AGENT_LIST="$AGENT_LIST"
+awk '/cat > "\$cleanup_script" << .CLEANUP_EOF.$/{flag=1; next} /^CLEANUP_EOF$/{flag=0} flag' "$STOP_HOOK" > "$CLEANUP_SCRIPT"
+chmod +x "$CLEANUP_SCRIPT"
+bash "$CLEANUP_SCRIPT" "cleanuptest3" "$STATE_FILE" "false" "false" "$LOOP_DIR" "$WORK_DIR" "$LOG_FILE" >/dev/null 2>&1
+
+for pane in wO:p1 wB:p1 wLOST:p1 wFG:p1; do
+  if grep -q "pane close $pane" "$CALL_LOG"; then pass "closed $pane"; else fail "did not close $pane" "$(cat "$CALL_LOG")"; fi
+done
+for pane in wOTHER:p1 wSIB:p1 wU:p1; do
+  if grep -q "$pane" "$CALL_LOG"; then fail "closed foreign pane $pane" "$(cat "$CALL_LOG")"; else pass "left $pane alone"; fi
+done
+if grep -q "TMUX CALL" "$CALL_LOG"; then fail "tmux used for herdr original session" "$(cat "$CALL_LOG")"; else pass "no tmux call for herdr original session"; fi
+
+echo -e "${YELLOW}Test: sweep keeps the preserved final pane${NC}"
+: > "$CALL_LOG"
+cat > "$STATE_FILE" <<EOF
+{"loop_id":"cleanuptest3","active":true,"backend":"herdr","original_session_name":"",
+ "spawned_sessions":[{"name":"ralph-cleanuptest3-3-cccccc","pane_id":"wLOST:p1","session_number":3}]}
+EOF
+awk '/cat > "\$cleanup_script" << .CLEANUP_EOF.$/{flag=1; next} /^CLEANUP_EOF$/{flag=0} flag' "$STOP_HOOK" > "$CLEANUP_SCRIPT"
+chmod +x "$CLEANUP_SCRIPT"
+bash "$CLEANUP_SCRIPT" "cleanuptest3" "$STATE_FILE" "true" "false" "$LOOP_DIR" "$WORK_DIR" "$LOG_FILE" >/dev/null 2>&1
+if grep -q "wLOST:p1" "$CALL_LOG"; then fail "preserved final pane was closed by sweep" "$(cat "$CALL_LOG")"; else pass "preserved final pane kept"; fi
+if grep -q "pane close wB:p1" "$CALL_LOG" && grep -q "pane close wO:p1" "$CALL_LOG"; then pass "other loop panes still swept"; else fail "sweep skipped other loop panes" "$(cat "$CALL_LOG")"; fi
 
 echo ""
 echo "========================================"

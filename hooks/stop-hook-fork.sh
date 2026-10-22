@@ -525,6 +525,51 @@ log() {
   echo "[$(date -Iseconds)] DETACHED: $1" >> "$LOG_FILE"
 }
 
+# Launch-profile shim cleanup (the detached script runs outside the hook's shell).
+[[ -n "${RALPH_PLUGIN_ROOT:-}" && -f "$RALPH_PLUGIN_ROOT/scripts/lib-launch-profile.sh" ]] \
+  && source "$RALPH_PLUGIN_ROOT/scripts/lib-launch-profile.sh" 2>/dev/null
+_lp_cleanup() { declare -F launch_profile_cleanup_pane >/dev/null && launch_profile_cleanup_pane "$1"; return 0; }
+
+# herdr only. state.json can miss panes (lost concurrent write, relaunch/
+# original session), so completion also sweeps live agents by loop name
+# prefix + this loop's cwd; a pane is closed at most once per run.
+HERDR_PREFIX=$(printf '%s' "ralph-${LOOP_ID}-" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-24)
+
+herdr_close_pane() {
+  local pane="$1" why="$2"
+  if herdr pane close "$pane" 2>/dev/null; then
+    log "Removed: $why (pane $pane)"
+  else
+    log "Failed to remove or not found: $why (pane $pane)"
+  fi
+  _lp_cleanup "$pane"
+}
+
+herdr_pane_of_agent() {
+  herdr agent list 2>/dev/null \
+    | jq -r --arg n "$1" '.result.agents[]? | select(.name == $n) | .pane_id // empty' 2>/dev/null | head -1
+}
+
+herdr_sweep_loop_agents() {
+  local keep_pane="$1" listing pane
+  if ! listing=$(herdr agent list 2>/dev/null) || [[ -z "$listing" ]]; then
+    log "WARN: herdr agent list failed - label sweep skipped, panes outside state.json may remain"
+    return 0
+  fi
+  while IFS=$'\t' read -r pane name; do
+    [[ -z "$pane" ]] && continue
+    if [[ -n "$keep_pane" && "$pane" == "$keep_pane" ]]; then
+      log "Sweep preserving final pane: $name ($pane)"
+      continue
+    fi
+    herdr_close_pane "$pane" "swept agent $name"
+  done < <(jq -r --arg p "$HERDR_PREFIX" --arg cwd "$PROJECT_ROOT" '.result.agents[]?
+      | select((.name // "") | startswith($p))
+      | select((.name // "") | test("-[0-9a-f]{6}$"))
+      | select((.cwd // "") == $cwd or (.foreground_cwd // "") == $cwd)
+      | [.pane_id, .name] | @tsv' <<< "$listing" 2>/dev/null)
+}
+
 log "Cleanup starting for loop $LOOP_ID"
 
 # Wait a moment for the parent hook to finish outputting JSON
@@ -579,6 +624,25 @@ else
           fi
         fi
       done
+    fi
+
+    KEEP_PANE=""
+    if [[ "$BACKEND" == "herdr" ]]; then
+      if [[ "$PRESERVE_FINAL" == "true" ]]; then
+        KEEP_PANE=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$STATE_FILE" 2>/dev/null)
+      fi
+      if [[ -n "$ORIGINAL_SESSION" ]]; then
+        ORIG_PANE=$(herdr_pane_of_agent "$ORIGINAL_SESSION")
+        if [[ -z "$ORIG_PANE" ]]; then
+          log "Original session not a live herdr agent: $ORIGINAL_SESSION"
+        elif [[ -n "$KEEP_PANE" && "$ORIG_PANE" == "$KEEP_PANE" ]]; then
+          log "Original session is the preserved final: $ORIGINAL_SESSION"
+        else
+          herdr_close_pane "$ORIG_PANE" "original session $ORIGINAL_SESSION"
+        fi
+      fi
+      herdr_sweep_loop_agents "$KEEP_PANE"
+      ORIGINAL_SESSION=""
     fi
 
     # NEW: Remove original session if preserving final and spawned sessions exist
@@ -649,7 +713,7 @@ CLEANUP_EOF
 
   # Run the cleanup script detached from the current process
   # Use subshell + nohup + disown for macOS compatibility (setsid not available on macOS)
-  ( nohup "$cleanup_script" "$loop_id" "$state_file" "$preserve_final" "$no_cleanup" "$loop_dir" "$project_root" "$log_file" </dev/null >/dev/null 2>&1 & )
+  ( RALPH_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}" nohup "$cleanup_script" "$loop_id" "$state_file" "$preserve_final" "$no_cleanup" "$loop_dir" "$project_root" "$log_file" </dev/null >/dev/null 2>&1 & )
 
   debug_log "DETACHED CLEANUP: Background process spawned"
 }
