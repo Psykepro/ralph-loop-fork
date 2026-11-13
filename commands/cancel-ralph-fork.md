@@ -25,17 +25,16 @@ Execute the cancel script:
 ## What it does
 
 - `--list`: Shows every active loop with `active`, `sessions`, and `iterations/budget`. Does not touch anything.
-- `LOOP_ID`: Kills every tmux session belonging to the loop (spawned + original launcher), then removes its state directory at `.claude/ralph-fork/<LOOP_ID>/`.
+- `LOOP_ID`: Closes every herdr pane belonging to the loop, then removes its state directory at `.claude/ralph-fork/<LOOP_ID>/`.
 - `--all`: Same as above for every loop. The `.claude/ralph-fork/.archive/` directory is preserved.
-- `--all-stuck` / `--stuck`: Targets only loops where `active=true` AND (`executing_on_completion=true` OR `awaiting_confirmation=true`). These are loops whose continuation cycle never fired — typically because the tmux session was killed mid-BLOCK. Writes `termination_reason=user_cancelled_stuck` before removing state. Requires `jq`.
+- `--all-stuck` / `--stuck`: Targets only loops where `active=true` AND (`executing_on_completion=true` OR `awaiting_confirmation=true`). These are loops whose continuation cycle never fired — typically because the herdr pane was closed mid-BLOCK. Writes `termination_reason=user_cancelled_stuck` before removing state. Requires `jq`.
 
 ## Session discovery
 
 The cancel script uses `state.json` as the source of truth:
 
-1. `.spawned_sessions[].name` — every session forked by the loop.
-2. `.original_session_name` — the tmux session you launched the loop from.
+1. `.spawned_sessions[].pane_id` — every herdr pane forked by the loop.
 
-If `state.json` is missing or corrupt (or `jq` is not installed), it falls back to `tmux ls | grep "^ralph-<LOOP_ID>-"`.
+If `state.json` is missing or corrupt (or `jq` is not installed), it falls back to the loop's herdr workspace/tab labels.
 
-It is safe to run even if `tmux` is uninstalled, if some sessions are already dead, or if the loop is in a partially-corrupted state — the script warns to stderr and continues.
+It is safe to run even if `herdr` is not running, if some sessions are already dead, or if the loop is in a partially-corrupted state — the script warns to stderr and continues.

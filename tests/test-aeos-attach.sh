@@ -25,16 +25,22 @@ if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]] && \
   REAL_AEOS_SCRIPT="${CLAUDE_PROJECT_DIR}/.claude/scripts/ralph_aeos_config.py"
 fi
 
-# ── Stub bin: override tmux so worktree tests are hermetic (no real sessions) ──
-# The stub logs every invocation so tests can assert on ATTEMPTED tmux calls
-# (e.g. D5 asserts the doom cleanup tries to kill the final session).
+# ── Stub bin: override herdr so tests are hermetic (no real panes) ──
+# The stub logs every invocation so tests can assert on ATTEMPTED herdr calls
+# (e.g. D5 asserts the doom cleanup tries to close the final session's pane).
 STUB_BIN=$(mktemp -d -t aeos-stubs-XXXX)
-cat > "$STUB_BIN/tmux" <<STUBEOF
+cat > "$STUB_BIN/herdr" <<STUBEOF
 #!/bin/sh
-echo "\$@" >> "$STUB_BIN/tmux-calls.log"
+echo "\$@" >> "$STUB_BIN/herdr-calls.log"
+case "\$1 \$2" in
+  "status "*) echo "status: running" ;;
+  "workspace create") echo '{"result":{"root_pane":{"pane_id":"wS:p1","workspace_id":"wS"},"workspace":{"workspace_id":"wS","label":"stub"}}}' ;;
+  "tab create") echo '{"result":{"root_pane":{"pane_id":"wS:p1","tab_id":"wS:t1","workspace_id":"wS"},"tab":{"tab_id":"wS:t1","workspace_id":"wS","label":"stub"}}}' ;;
+esac
 exit 0
 STUBEOF
-chmod +x "$STUB_BIN/tmux"
+chmod +x "$STUB_BIN/herdr"
+unset HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
 export PATH="$STUB_BIN:$PATH"
 
 # ── Global cleanup ────────────────────────────────────────────────────────────
@@ -139,7 +145,7 @@ OUT1=$(mktemp); ERR1=$(mktemp)
 cd "$R1"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "aeos-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
+  --name "aeos-nwt" --total-budget 1 --max-per-session 1 \
   >"$OUT1" 2>"$ERR1"
 RC1=$?
 cd - >/dev/null
@@ -182,7 +188,7 @@ cd "$R2"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
   --name "aeos-wt" --total-budget 1 --max-per-session 1 --worktree --base-ref HEAD \
-  --backend tmux \
+  \
   >"$OUT2" 2>"$ERR2"
 RC2=$?
 cd - >/dev/null
@@ -224,7 +230,7 @@ OUT3=$(mktemp); ERR3=$(mktemp)
 cd "$R3"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "sa-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
+  --name "sa-nwt" --total-budget 1 --max-per-session 1 \
   >"$OUT3" 2>"$ERR3"
 RC3=$?
 cd - >/dev/null
@@ -272,7 +278,7 @@ OUT4=$(mktemp); ERR4=$(mktemp)
 cd "$R4"
 bash "$SETUP" \
   --checklist "_project/progress/in-progress/test-feature/MASTER-CHECKLIST.md" \
-  --name "fail-nwt" --total-budget 1 --max-per-session 1 --backend tmux \
+  --name "fail-nwt" --total-budget 1 --max-per-session 1 \
   >"$OUT4" 2>"$ERR4"
 RC4=$?
 cd - >/dev/null
@@ -852,17 +858,16 @@ echo -e "${YELLOW}Test D5 (v0.5.2): Doom termination kills the live session even
 # session it was terminating — sessions 1..N-1 were already dead, and the
 # "final session" IS the live doomed session, so the kill was a no-op and the
 # loop ran on unmanaged. Doom/abort termination must never preserve.
-# tmux is the suite-wide logging stub — assert the cleanup ATTEMPTS the kill
-# (the real-tmux end-to-end kill path is covered by cleanup itself; what this
-# guards is the preserve decision).
+# herdr is the suite-wide logging stub — assert the cleanup ATTEMPTS the close
+# (what this guards is the preserve decision).
 
 TD5=$(mktemp -d -t aeos-td5-XXXX); _CLEANUP_DIRS+=("$TD5")
-D5_TMUX="ralph-fp-d5-$$"
+D5_PANE="wD5:p$$"
 # stuck=3, warned=true → this sample is the kill sample
 make_stop_fixture "$TD5" "fp-d5" 3 "" 0 5 3 false 100 true true
 ST_D5="$TD5/.claude/ralph-fork/fp-d5/state.json"
-jq --arg s "$D5_TMUX" \
-  '.preserve_final_session = true | .spawned_sessions = [{"name": $s}] | .doom_warned_session = 2' \
+jq --arg s "$D5_PANE" \
+  '.preserve_final_session = true | .spawned_sessions = [{"name": "ralph-fp-d5-1", "pane_id": $s}] | .doom_warned_session = 2' \
   "$ST_D5" > "${ST_D5}.tmp" && mv "${ST_D5}.tmp" "$ST_D5"
 seed_progress_fp "$TD5" "fp-d5"
 bump_fork_session "$TD5" "fp-d5" 3
@@ -879,15 +884,15 @@ fi
 D5_KILLED=false
 for _ in $(seq 1 10); do
   sleep 1
-  if grep -q "kill-session -t =$D5_TMUX" "$STUB_BIN/tmux-calls.log" 2>/dev/null; then
+  if grep -q "pane close $D5_PANE" "$STUB_BIN/herdr-calls.log" 2>/dev/null; then
     D5_KILLED=true; break
   fi
 done
 if [[ "$D5_KILLED" == "true" ]]; then
-  pass "doom-kill: cleanup killed the final session despite preserve_final_session=true"
+  pass "doom-kill: cleanup closed the final session pane despite preserve_final_session=true"
 else
   fail "doom-kill: final session preserved on doom abort (zombie loop, INC-031)" \
-    "stub calls: $(grep "$D5_TMUX" "$STUB_BIN/tmux-calls.log" 2>/dev/null | tr '\n' ' ')"
+    "stub calls: $(grep "$D5_PANE" "$STUB_BIN/herdr-calls.log" 2>/dev/null | tr '\n' ' ')"
 fi
 
 echo ""

@@ -3,12 +3,12 @@
 # Tests run_cleanup_detached()'s embedded cleanup script (the CLEANUP_EOF
 # heredoc in hooks/stop-hook-fork.sh) for the herdr backend. This is the
 # code path that actually fires when a ralph loop completes -- a real bug
-# was found here on 2026-08-09: the heredoc was 100% hardcoded to
-# `tmux kill-session`, silently leaking every herdr pane on loop completion
+# was found here on 2026-08-09: the heredoc did not close
+# herdr panes at all, silently leaking every herdr pane on loop completion
 # (confirmed via a live spawn: workspace stayed listed as agent_status=done
 # after the loop archived). This test extracts the heredoc verbatim from
 # the real script (so it can never silently drift from production) and
-# runs it against a hermetic herdr/tmux stub.
+# runs it against a hermetic herdr stub.
 
 set -uo pipefail
 
@@ -63,19 +63,6 @@ exit 0
 STUBH
 chmod +x "$STUB_DIR/herdr"
 
-cat > "$STUB_DIR/tmux" <<'STUBT'
-#!/bin/bash
-{
-  printf 'TMUX CALL (SHOULD NEVER HAPPEN FOR HERDR BACKEND): '
-  for arg in "$@"; do
-    printf '%q ' "$arg"
-  done
-  printf '\n'
-} >> "$STUB_CALL_LOG"
-exit 1
-STUBT
-chmod +x "$STUB_DIR/tmux"
-
 export STUB_CALL_LOG="$CALL_LOG"
 export PATH="$STUB_DIR:$PATH"
 
@@ -97,7 +84,7 @@ EOF
 
 LOG_FILE="$WORK_DIR/detached.log"
 
-echo -e "${YELLOW}Test: herdr-backend detached cleanup closes panes via herdr, never tmux${NC}"
+echo -e "${YELLOW}Test: herdr-backend detached cleanup closes panes via herdr${NC}"
 
 bash "$CLEANUP_SCRIPT" "cleanuptest" "$STATE_FILE" "false" "false" "$LOOP_DIR" "$WORK_DIR" "$LOG_FILE" >/dev/null 2>&1
 
@@ -111,12 +98,6 @@ if grep -q "^CALL: pane close" "$CALL_LOG"; then
   pass "herdr invoked with 'pane close' subcommand"
 else
   fail "herdr not invoked with expected 'pane close' subcommand" "$(cat "$CALL_LOG" 2>/dev/null)"
-fi
-
-if grep -q "TMUX CALL" "$CALL_LOG"; then
-  fail "tmux was called for a herdr-backend loop (regression of the 2026-08-09 bug)" "$(cat "$CALL_LOG" 2>/dev/null)"
-else
-  pass "tmux was never called for herdr-backend cleanup"
 fi
 
 if [[ -f "$STATE_FILE" ]] && [[ "$(jq -r '.spawned_sessions | length' "$STATE_FILE")" == "0" ]]; then
@@ -191,7 +172,6 @@ done
 for pane in wOTHER:p1 wSIB:p1 wU:p1; do
   if grep -q "$pane" "$CALL_LOG"; then fail "closed foreign pane $pane" "$(cat "$CALL_LOG")"; else pass "left $pane alone"; fi
 done
-if grep -q "TMUX CALL" "$CALL_LOG"; then fail "tmux used for herdr original session" "$(cat "$CALL_LOG")"; else pass "no tmux call for herdr original session"; fi
 
 echo -e "${YELLOW}Test: sweep keeps the preserved final pane${NC}"
 : > "$CALL_LOG"

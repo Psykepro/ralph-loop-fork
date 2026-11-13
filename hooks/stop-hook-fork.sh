@@ -272,36 +272,20 @@ cleanup_current_session() {
   local session_number="$2"
   local state_file="${3:-}"
 
-  local backend="tmux"
+  local pane_id=""
   if [[ -n "$state_file" ]] && [[ -f "$state_file" ]]; then
-    backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
-  fi
-
-  if [[ "$backend" == "herdr" ]]; then
-    local pane_id
     pane_id=$(jq -r --argjson n "$session_number" \
       '.spawned_sessions[]? | select(.session_number == $n) | .pane_id' \
       "$state_file" 2>/dev/null | head -1)
-    debug_log "Cleaning up current herdr session: loop=$loop_id session=$session_number pane=$pane_id"
-    if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
-      info "   Removed previous herdr pane: $pane_id"
-    else
-      debug_log "herdr pane for session $session_number not found or already removed"
-    fi
-    _lp_cleanup "$pane_id"
-    return 0
   fi
-
-  local session_name="ralph-${loop_id}-${session_number}"
-  debug_log "Cleaning up current session: $session_name"
-
-  if tmux kill-session -t "=$session_name" 2>/dev/null; then
-    info "   Removed previous session: $session_name"
-    return 0
+  debug_log "Cleaning up current herdr session: loop=$loop_id session=$session_number pane=$pane_id"
+  if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
+    info "   Removed previous herdr pane: $pane_id"
   else
-    debug_log "Session $session_name not found or already removed"
-    return 0
+    debug_log "herdr pane for session $session_number not found or already removed"
   fi
+  _lp_cleanup "$pane_id"
+  return 0
 }
 
 # ============================================================================
@@ -328,45 +312,25 @@ cleanup_ralph_sessions() {
 
   info "Cleaning up ralph sessions for loop: $loop_id..."
 
-  local backend
-  backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
-
-  # Kill primitive dispatch: tmux session-name kill, or herdr pane close.
-  # herdr entries were never recorded into original_session_name (only
-  # tmux's very-first-launch path populates that field — D6's worktree-mode
-  # herdr spawn records into spawned_sessions[] like every other herdr
-  # fork), so the "no forks occurred, kill original_session" path below is
-  # inert for herdr loops by construction, not specially branched.
+  # herdr spawns record into spawned_sessions[] and never into
+  # original_session_name, so the "no forks occurred, kill original_session"
+  # path below is inert by construction.
   _kill_one() {
     local target="$1"
-    if [[ "$backend" == "herdr" ]]; then
-      if herdr pane close "$target" 2>/dev/null; then
-        info "   Removed: $target"
-        debug_log "Successfully closed herdr pane: $target"
-      else
-        debug_log "herdr pane already closed or not found: $target"
-      fi
-      _lp_cleanup "$target"
+    if herdr pane close "$target" 2>/dev/null; then
+      info "   Removed: $target"
+      debug_log "Successfully closed herdr pane: $target"
     else
-      if tmux kill-session -t "=$target" 2>/dev/null; then
-        info "   Removed: $target"
-        debug_log "Successfully removed: $target"
-      else
-        debug_log "Failed to remove or not found: $target"
-      fi
+      debug_log "herdr pane already closed or not found: $target"
     fi
+    _lp_cleanup "$target"
   }
 
-  # Get spawned session identifiers from state.json — tmux backend keys by
-  # session NAME, herdr backend keys by PANE_ID (the authoritative teardown
+  # Spawned sessions are keyed by PANE_ID (the authoritative teardown
   # target; herdr agent names are for prompt/read targeting, not teardown).
   local session_names
-  if [[ "$backend" == "herdr" ]]; then
-    session_names=$(jq -r '.spawned_sessions[]?.pane_id // empty' "$state_file" 2>/dev/null)
-  else
-    session_names=$(jq -r '.spawned_sessions[]?.name // empty' "$state_file" 2>/dev/null)
-  fi
-  debug_log "Sessions to cleanup ($backend): $session_names"
+  session_names=$(jq -r '.spawned_sessions[]?.pane_id // empty' "$state_file" 2>/dev/null)
+  debug_log "Sessions to cleanup: $session_names"
 
   # Read original session name (for single-session completions with no forks)
   local original_session
@@ -390,11 +354,7 @@ cleanup_ralph_sessions() {
   # Get the last session identifier if we need to preserve it
   local last_session=""
   if [[ "$preserve_final" == "true" ]]; then
-    if [[ "$backend" == "herdr" ]]; then
-      last_session=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$state_file" 2>/dev/null)
-    else
-      last_session=$(jq -r '.spawned_sessions[-1]?.name // empty' "$state_file" 2>/dev/null)
-    fi
+    last_session=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$state_file" 2>/dev/null)
     debug_log "Preserving final session: $last_session"
     info "   Preserving final session: $last_session (--preserve-final-session)"
   fi
@@ -419,11 +379,7 @@ cleanup_ralph_sessions() {
 
   # Clear the spawned_sessions array after cleanup (keep final if preserved)
   if [[ "$preserve_final" == "true" ]] && [[ -n "$last_session" ]]; then
-    if [[ "$backend" == "herdr" ]]; then
-      update_state "$state_file" ".spawned_sessions = [{\"pane_id\": \"$last_session\", \"preserved\": true}]"
-    else
-      update_state "$state_file" ".spawned_sessions = [{\"name\": \"$last_session\", \"preserved\": true}]"
-    fi
+    update_state "$state_file" ".spawned_sessions = [{\"pane_id\": \"$last_session\", \"preserved\": true}]"
   else
     update_state "$state_file" ".spawned_sessions = []"
   fi
@@ -511,7 +467,7 @@ run_cleanup_detached() {
   cat > "$cleanup_script" << 'CLEANUP_EOF'
 #!/bin/bash
 # Detached cleanup script for ralph-loop-fork
-# This runs in a separate process group so killing the parent tmux won't kill this
+# This runs in a separate process group so closing the parent herdr pane won't kill this
 
 LOOP_ID="$1"
 STATE_FILE="$2"
@@ -581,89 +537,46 @@ if [[ "$NO_CLEANUP" == "true" ]]; then
 else
   # Read session info from state file
   if [[ -f "$STATE_FILE" ]]; then
-    BACKEND=$(jq -r '.backend // "tmux"' "$STATE_FILE" 2>/dev/null)
     SESSION_NAMES=$(jq -r '.spawned_sessions[]?.name // empty' "$STATE_FILE" 2>/dev/null)
     ORIGINAL_SESSION=$(jq -r '.original_session_name // empty' "$STATE_FILE" 2>/dev/null)
     LAST_SESSION=$(jq -r '.spawned_sessions[-1]?.name // empty' "$STATE_FILE" 2>/dev/null)
 
-    log "Backend: $BACKEND"
     log "Sessions to cleanup: $SESSION_NAMES"
     log "Original session: $ORIGINAL_SESSION"
     log "Last session (preserve if needed): $LAST_SESSION"
 
-    if [[ "$BACKEND" == "herdr" ]]; then
-      # herdr targets panes by pane_id, not by session name -- iterate the
-      # spawned_sessions[] objects to pair each name with its pane_id.
-      while IFS=$'\t' read -r session_name pane_id; do
-        [[ -z "$session_name" ]] && continue
-        if [[ "$PRESERVE_FINAL" == "true" ]] && [[ "$session_name" == "$LAST_SESSION" ]]; then
-          log "Preserving final session: $session_name"
-          continue
-        fi
-        log "Removing session: $session_name (pane $pane_id)"
-        if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
-          log "Removed: $session_name"
-        else
-          log "Failed to remove or not found: $session_name"
-        fi
-        _lp_cleanup "$pane_id"
-      done < <(jq -r '.spawned_sessions[]? | [.name, (.pane_id // "")] | @tsv' "$STATE_FILE" 2>/dev/null)
-    else
-      # Remove spawned sessions (except last if preserve_final)
-      for session_name in $SESSION_NAMES; do
-        if [[ -n "$session_name" ]]; then
-          if [[ "$PRESERVE_FINAL" == "true" ]] && [[ "$session_name" == "$LAST_SESSION" ]]; then
-            log "Preserving final session: $session_name"
-            continue
-          fi
-          log "Removing session: $session_name"
-          if tmux kill-session -t "=$session_name" 2>/dev/null; then
-            log "Removed: $session_name"
-          else
-            log "Failed to remove or not found: $session_name"
-          fi
-        fi
-      done
-    fi
+    # herdr targets panes by pane_id, not by session name -- iterate the
+    # spawned_sessions[] objects to pair each name with its pane_id.
+    while IFS=$'\t' read -r session_name pane_id; do
+      [[ -z "$session_name" ]] && continue
+      if [[ "$PRESERVE_FINAL" == "true" ]] && [[ "$session_name" == "$LAST_SESSION" ]]; then
+        log "Preserving final session: $session_name"
+        continue
+      fi
+      log "Removing session: $session_name (pane $pane_id)"
+      if [[ -n "$pane_id" ]] && herdr pane close "$pane_id" 2>/dev/null; then
+        log "Removed: $session_name"
+      else
+        log "Failed to remove or not found: $session_name"
+      fi
+      _lp_cleanup "$pane_id"
+    done < <(jq -r '.spawned_sessions[]? | [.name, (.pane_id // "")] | @tsv' "$STATE_FILE" 2>/dev/null)
 
     KEEP_PANE=""
-    if [[ "$BACKEND" == "herdr" ]]; then
-      if [[ "$PRESERVE_FINAL" == "true" ]]; then
-        KEEP_PANE=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$STATE_FILE" 2>/dev/null)
-      fi
-      if [[ -n "$ORIGINAL_SESSION" ]]; then
-        ORIG_PANE=$(herdr_pane_of_agent "$ORIGINAL_SESSION")
-        if [[ -z "$ORIG_PANE" ]]; then
-          log "Original session not a live herdr agent: $ORIGINAL_SESSION"
-        elif [[ -n "$KEEP_PANE" && "$ORIG_PANE" == "$KEEP_PANE" ]]; then
-          log "Original session is the preserved final: $ORIGINAL_SESSION"
-        else
-          herdr_close_pane "$ORIG_PANE" "original session $ORIGINAL_SESSION"
-        fi
-      fi
-      herdr_sweep_loop_agents "$KEEP_PANE"
-      ORIGINAL_SESSION=""
+    if [[ "$PRESERVE_FINAL" == "true" ]]; then
+      KEEP_PANE=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$STATE_FILE" 2>/dev/null)
     fi
-
-    # NEW: Remove original session if preserving final and spawned sessions exist
-    if [[ "$PRESERVE_FINAL" == "true" ]] && [[ -n "$ORIGINAL_SESSION" ]] && [[ -n "$LAST_SESSION" ]]; then
-      log "Removing original session (launcher): $ORIGINAL_SESSION"
-      if tmux kill-session -t "=$ORIGINAL_SESSION" 2>/dev/null; then
-        log "Removed original session: $ORIGINAL_SESSION"
+    if [[ -n "$ORIGINAL_SESSION" ]]; then
+      ORIG_PANE=$(herdr_pane_of_agent "$ORIGINAL_SESSION")
+      if [[ -z "$ORIG_PANE" ]]; then
+        log "Original session not a live herdr agent: $ORIGINAL_SESSION"
+      elif [[ -n "$KEEP_PANE" && "$ORIG_PANE" == "$KEEP_PANE" ]]; then
+        log "Original session is the preserved final: $ORIGINAL_SESSION"
       else
-        log "Failed to remove original session (may not exist): $ORIGINAL_SESSION"
+        herdr_close_pane "$ORIG_PANE" "original session $ORIGINAL_SESSION"
       fi
     fi
-
-    # Remove original session if not preserving (cleanup all mode)
-    if [[ -n "$ORIGINAL_SESSION" ]] && [[ "$PRESERVE_FINAL" != "true" ]]; then
-      log "Removing original session (no-preserve mode): $ORIGINAL_SESSION"
-      if tmux kill-session -t "=$ORIGINAL_SESSION" 2>/dev/null; then
-        log "Removed original: $ORIGINAL_SESSION"
-      else
-        log "Original already removed or not found: $ORIGINAL_SESSION"
-      fi
-    fi
+    herdr_sweep_loop_agents "$KEEP_PANE"
 
     # Update state file
     if [[ "$PRESERVE_FINAL" == "true" ]] && [[ -n "$LAST_SESSION" ]]; then
@@ -767,7 +680,7 @@ dispatch_worktree_gc() {
   local preserve_final
   preserve_final=$(jq -r '.preserve_final_session // false' "$state_file" 2>/dev/null)
   if [[ "$preserve_final" == "true" ]]; then
-    debug_log "TRIGGER-0: preserve_final_session=true — deferred by construction, not spawning the helper (run_cleanup_detached already preserves the final session's tmux pane; safety-net triggers reclaim later once it's actually gone)"
+    debug_log "TRIGGER-0: preserve_final_session=true — deferred by construction, not spawning the helper (run_cleanup_detached already preserves the final session's herdr pane; safety-net triggers reclaim later once it's actually gone)"
     return 0
   fi
 
@@ -798,8 +711,11 @@ dispatch_worktree_gc() {
     return 0
   fi
 
-  local pane_pid
-  pane_pid=$(tmux list-panes -t "=$session_name" -F '#{pane_pid}' 2>/dev/null | head -1)
+  local pane_id pane_pid
+  pane_id=$(jq -r '.spawned_sessions[-1]?.pane_id // empty' "$state_file" 2>/dev/null)
+  if [[ -n "$pane_id" ]]; then
+    pane_pid=$(herdr pane process-info --pane "$pane_id" 2>/dev/null | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null)
+  fi
   if [[ -z "$pane_pid" ]]; then
     debug_log "TRIGGER-0: could not resolve pane pid for session '$session_name' — skipping dispatch (safety-net triggers will pick this up)"
     return 0
@@ -821,9 +737,9 @@ dispatch_worktree_gc() {
   # worktree-gc.py's lsof-based live_session_process() probe, which matches
   # on cwd alone with no pid awareness (round-9 zero-issue-loop Reliability
   # HIGH): the row classifies DEFERRED forever, the PRIMARY trigger never
-  # reclaims, and the tmux session leaks permanently with zero signal.
+  # reclaims, and the herdr pane leaks permanently with zero signal.
   local helper_pid
-  helper_pid=$( cd "$main_root" && { CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "tmux:$session_name" </dev/null >/dev/null 2>&1 & echo $!; } )
+  helper_pid=$( cd "$main_root" && { CLAUDE_PROJECT_DIR="$main_root" nohup python3 "$gc_script" --apply --only "$worktree_path" --after-pid "$pane_pid" --kill-session "herdr:$session_name" </dev/null >/dev/null 2>&1 & echo $!; } )
   register_gc_helper "$main_root" "$helper_pid" "$pane_pid"
 }
 
@@ -1118,7 +1034,7 @@ extract_loop_from_transcript() {
 # WORKTREE FALLBACK: LOOP ID DETECTION VIA STATE.JSON
 # ============================================================================
 # When `claude --dangerously-skip-permissions 'message'` launches a fresh
-# tmux session in a worktree, the initial CLI message is NOT written to the
+# herdr session in a worktree, the initial CLI message is NOT written to the
 # .jsonl transcript (only the ai-title line is written). This means the
 # RALPH LOOP CONTEXT marker -- which lives in the prompt FILE, not in the
 # CLI message -- is never present in the transcript, causing transcript-based
@@ -1130,9 +1046,9 @@ extract_loop_from_transcript() {
 # GUARD: cwd-equals-worktree_path alone is not an identity check -- any
 # ordinary session that `cd`s into a loop's worktree (e.g. to inspect it)
 # satisfies that predicate honestly and gets misidentified as the loop's own
-# spawned session. fork-terminal.sh unconditionally exports
-# RALPH_LOOP_ACTIVE=1 into every session it actually spawns (see its
-# FORK_CMD); a manually-started or ad-hoc session never has this set, since
+# spawned session. fork-terminal-herdr.sh unconditionally exports
+# RALPH_LOOP_ACTIVE=1 into every session it actually spawns (via the herdr
+# --env flag); a manually-started or ad-hoc session never has this set, since
 # `cd` cannot set environment variables. Require it before trusting the cwd
 # match.
 extract_loop_from_worktree_state() {
@@ -1179,16 +1095,9 @@ spawn_new_session() {
   debug_log "SPAWNING new session $session_number for loop $loop_id"
   debug_log "PROJECT_ROOT for fork: $project_root"
 
-  local backend
-  backend=$(jq -r '.backend // "tmux"' "$state_file" 2>/dev/null || echo "tmux")
-
   # Execute fork script - MUST pass project_root so it can cd there first
   # This fixes the bug where hook runs from subdirectory after Claude cd's
-  if [[ "$backend" == "herdr" ]]; then
-    "$plugin_root/scripts/fork-terminal-herdr.sh" "$loop_id" "$session_number" "$project_root"
-  else
-    "$plugin_root/scripts/fork-terminal.sh" "$loop_id" "$session_number" "$project_root"
-  fi
+  "$plugin_root/scripts/fork-terminal-herdr.sh" "$loop_id" "$session_number" "$project_root"
 
   info "Ralph Loop Fork [$loop_id]: Spawned session $session_number"
 }
@@ -1427,7 +1336,7 @@ fi
 
 # Extract loop ID from transcript; fall back to worktree-path matching if the
 # transcript is empty (happens when the session was launched via
-# `claude --dangerously-skip-permissions 'message'` in tmux -- the CLI
+# `claude --dangerously-skip-permissions 'message'` in herdr -- the CLI
 # message is stored in memory, not written to the .jsonl file).
 # USED_WORKTREE_FALLBACK=true when the worktree path match is used instead of
 # transcript; the "no assistant messages" handler uses this flag to BLOCK instead
@@ -1817,7 +1726,7 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     if [[ "$USED_WORKTREE_FALLBACK" == "true" ]]; then
       # Worktree mode: we previously BLOCKed to get Claude's status declaration.
       # Claude's response is now in the transcript (continuation turns ARE written
-      # even when the initial tmux-launched session is not). Fall through to the
+      # even when the initial herdr-launched session is not). Fall through to the
       # normal flow so we can check for the completion promise, checklist changes,
       # and iteration counter — then spawn or complete as appropriate.
       debug_log "CONTINUATION: No special state (worktree fallback) - falling through to normal flow"
@@ -2112,7 +2021,7 @@ if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null; then
   debug_log "No assistant messages found in transcript"
 
   if [[ "$USED_WORKTREE_FALLBACK" == "true" ]] && [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
-    # Worktree mode, first hook call: the initial tmux session turn is never written
+    # Worktree mode, first hook call: the initial herdr session turn is never written
     # to disk. BLOCK once — the continuation turn (Claude's response to the block
     # prompt) IS written to the transcript. Do NOT delete local.md.
     debug_log "WORKTREE FALLBACK: empty transcript on first call — blocking for status declaration"
@@ -2131,7 +2040,7 @@ if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null; then
 
     STATUS_PROMPT="RALPH LOOP [$LOOP_ID] — STATUS DECLARATION REQUIRED
 
-The stop hook cannot read your prior output because this session runs in a tmux worktree
+The stop hook cannot read your prior output because this session runs in a herdr worktree
 where the initial conversation turn is not written to the .jsonl transcript.
 
 CURRENT CHECKLIST STATE: ${CHECKED_COUNT} checked, ${UNCHECKED_COUNT} unchecked

@@ -10,22 +10,25 @@ TEST_DIR=$(mktemp -d)
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK_SCRIPT="$SCRIPT_DIR/hooks/stop-hook-fork.sh"
 
-# Resource teardown: the hook under test forks REAL tmux sessions running
-# `claude` (every loop id in this file starts with "test-", so the spawned
-# sessions are all named "ralph-test-*"). Removing TEST_DIR alone would leak
-# those sessions/processes — sweep them loudly and exact-match on exit.
+# Hermetic: the hook under test forks sessions through `herdr`; a stub on PATH
+# records the calls and returns canned JSON so no real pane/agent is ever
+# created, and there is nothing to sweep on exit.
+STUB_BIN=$(mktemp -d -t stop-hook-stubs-XXXX)
+cat > "$STUB_BIN/herdr" <<'STUBH'
+#!/bin/sh
+case "$1 $2" in
+  "status "*) echo "status: running" ;;
+  "workspace create") echo '{"result":{"root_pane":{"pane_id":"wH:p1","workspace_id":"wH"},"workspace":{"workspace_id":"wH","label":"stub"}}}' ;;
+  "tab create") echo '{"result":{"root_pane":{"pane_id":"wH:p1","tab_id":"wH:t1","workspace_id":"wH"},"tab":{"tab_id":"wH:t1","workspace_id":"wH","label":"stub"}}}' ;;
+esac
+exit 0
+STUBH
+chmod +x "$STUB_BIN/herdr"
+unset HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
+export PATH="$STUB_BIN:$PATH"
+
 cleanup() {
-  # Runtime resources FIRST, workspace deletion LAST (resource-teardown order).
-  local leaked
-  leaked=$(tmux list-sessions -F '#S' 2>/dev/null | grep '^ralph-test-' || true)
-  if [[ -n "$leaked" ]]; then
-    while IFS= read -r s; do
-      echo "⚠️  sweeping leaked tmux session: $s" >&2
-      tmux kill-session -t "=$s" 2>/dev/null \
-        || echo "❌ failed to kill leaked session $s — check 'tmux ls' manually" >&2
-    done <<< "$leaked"
-  fi
-  rm -rf "$TEST_DIR"
+  rm -rf "$TEST_DIR" "$STUB_BIN"
 }
 trap cleanup EXIT
 
@@ -410,7 +413,7 @@ test_confirmation_with_missing_boxes() {
 
   assert_contains "still unchecked" "$output" "Output mentions unchecked items"
   assert_state_flag "$loop_id" "awaiting_confirmation" "false" "awaiting_confirmation flag cleared"
-  # Note: spawn would fail in test because tmux not available, but flag cleared
+  # Note: spawn would fail in test because the herdr stub spawns nothing, but flag cleared
 
   echo ""
 }
@@ -1033,7 +1036,7 @@ echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
 echo -e "Tests failed: ${RED}$TESTS_FAILED${NC}"
 echo ""
 
-# Cleanup (TEST_DIR + spawned tmux sessions) runs via the EXIT trap above.
+# Cleanup (TEST_DIR + stub dir) runs via the EXIT trap above.
 
 if [[ $TESTS_FAILED -gt 0 ]]; then
   echo -e "${RED}SOME TESTS FAILED${NC}"

@@ -12,7 +12,7 @@ itself must NEVER call raw `git worktree add` -- it exclusively spawns sibling
 worktrees through `setup-ralph-loop-fork.sh --worktree` (the same script backing the
 `/ralph-loop-fork:ralph-loop-fork` slash command), so every spawned session goes
 through that script's own Entry Gate (state-dir collision checks, model/effort
-resolution, tmux session naming) instead of re-deriving worktree mechanics here.
+resolution, session naming) instead of re-deriving worktree mechanics here.
 
 Merge-order safety: option (b) -- parallel implementation, serial merge with rebase,
 no file-disjointness pre-check this iteration. Each sibling worktree's own Exit Gate

@@ -13,7 +13,7 @@ bash tests/test-stop-hook-states.sh
 ```
 
 Both tests are self-contained and create their fixtures in temporary
-directories. They require `bash`, `jq`, and `tmux`.
+directories. They require `bash`, `jq`, and `herdr`.
 
 ## Reporting bugs
 
@@ -23,7 +23,7 @@ Open an issue with:
 - What you expected.
 - What you got, including any output from `/tmp/ralph-fork-logs/` (or the
   directory you set via `RALPH_FORK_LOG_DIR`).
-- Your platform (`uname -a`, `bash --version`, `tmux -V`, `jq --version`).
+- Your platform (`uname -a`, `bash --version`, `herdr --version`, `jq --version`).
 
 ## Pull requests
 

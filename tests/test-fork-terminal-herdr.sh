@@ -3,8 +3,7 @@
 # Tests fork-terminal-herdr.sh's herdr-backend spawn call shapes against a
 # hermetic `herdr` CLI stub (records every invocation, returns canned JSON
 # matching the real CLI's response shape) -- no real herdr server required.
-# Mirrors test-fork-terminal-worktree.sh's tmux-stub pattern for the tmux
-# backend.
+# Same stub pattern as test-fork-terminal-worktree.sh.
 
 set -uo pipefail
 

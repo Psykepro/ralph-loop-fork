@@ -2,7 +2,7 @@
 
 # Iterations must END their turn while background sub-agents run, never
 # busy-wait. Guards the two halves of that contract across every launch
-# site (session 1 + forks, tmux + herdr):
+# site (session 1 + forks):
 #   1. ScheduleWakeup is removed from the spawned session's tool list.
 #   2. The iteration prompt tells the model to end its turn (the stop hook
 #      defers silently since v0.8.0; it does not hold the session open).
@@ -12,7 +12,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$SCRIPT_DIR/scripts/lib-session-launch.sh"
 LAUNCH_SCRIPTS=(
-  "$SCRIPT_DIR/scripts/fork-terminal.sh"
   "$SCRIPT_DIR/scripts/fork-terminal-herdr.sh"
   "$SCRIPT_DIR/scripts/setup-ralph-loop-fork.sh"
 )

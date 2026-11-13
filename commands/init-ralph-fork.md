@@ -1,5 +1,5 @@
 ---
-description: Check and install all ralph-loop-fork dependencies (jq, tmux, xxd, git ≥ 2.5, claude CLI)
+description: Check and install all ralph-loop-fork dependencies (jq, herdr, xxd, git ≥ 2.5, claude CLI)
 argument-hint: "[--check-only]"
 ---
 
@@ -14,7 +14,7 @@ Check that all required dependencies for ralph-loop-fork are installed, and atte
 | Dependency | Required | Notes |
 |---|---|---|
 | `jq` | Always | JSON state management |
-| `tmux` | Always | Session forking |
+| `herdr` | Always | Session backend (not auto-installed) |
 | `xxd` | Always | Loop ID generation |
 | `git ≥ 2.5` | `--worktree` mode | Worktree subcommand |
 | `claude` CLI | `--worktree` mode | Launched inside worktree |

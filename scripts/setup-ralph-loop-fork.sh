@@ -6,7 +6,7 @@
 #
 # PARALLEL SESSION SUPPORT:
 # Each loop is isolated in .claude/ralph-fork/{LOOP_ID}/ directory
-# Sessions named: ralph-{LOOP_ID}-{N} managed via tmux
+# Sessions named: ralph-{LOOP_ID}-{N} managed via herdr
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ source "$PLUGIN_ROOT/scripts/lib-session-launch.sh"
 source "$PLUGIN_ROOT/scripts/lib-spawn-lineage.sh"
 source "$PLUGIN_ROOT/scripts/lib-launch-profile.sh"
 
-# Colors only when the stream is a real terminal (tmux attach, direct runs).
+# Colors only when the stream is a real terminal (direct runs).
 # Captured output (Claude Code slash commands) shows raw escape bytes as
 # clutter, so there the ❌/✅/⚠️ markers carry the signal instead.
 if [[ -t 2 ]]; then RED_E=$'\033[1;31m'; RST_E=$'\033[0m'; else RED_E=""; RST_E=""; fi
@@ -200,16 +200,13 @@ WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""
 BASE_REF=""
 COPY_PATHS=""
-# Backend for session spawn/kill/list: "herdr" (default -- uses herdr's
-# socket-API CLI; requires a running herdr server, checked below) or "tmux"
-# (explicit opt-in/fallback). See scripts/fork-terminal-herdr.sh and
-# stop-hook-fork.sh's backend branches. Flipped to herdr-default 2026-08-11
-# once the herdr backend's live E2E kill-criterion (AC1) was met.
+# herdr is the only session backend (spawn/kill/list via herdr's socket-API
+# CLI; requires a running herdr server, checked below). Recorded in state.json.
 BACKEND="herdr"
-# P3 built-in default — single source of truth; scripts/fork-terminal.sh's
+# P3 built-in default — single source of truth; scripts/fork-terminal-herdr.sh's
 # read-back fallback reuses the SAME values (kept in sync by
 # tests/test-model-resolution.sh). Consumers: resolve_model_effort() below,
-# fork-terminal.sh legacy-state fallback.
+# fork-terminal-herdr.sh legacy-state fallback.
 DEFAULT_MODEL="sonnet"
 DEFAULT_EFFORT="medium"
 
@@ -259,13 +256,6 @@ OPTIONS:
                              when --worktree is not passed.
   --copy-paths "<a b c>"     Extra files/dirs to copy into the worktree
                              (space-separated inside a single quoted arg)
-  --backend <tmux|herdr>     Session spawn/kill/list backend (default: herdr).
-                             "herdr" uses herdr's socket-API CLI -- requires
-                             a running herdr server (checked at startup; the
-                             error message tells you how to start it or fall
-                             back to --backend tmux for this run). "tmux" is
-                             the explicit opt-in/fallback; requires tmux on
-                             PATH, checked only when this flag selects it.
   --model <name>             Pin the Claude model for all SPAWNED sessions
                              (e.g., sonnet, opus, haiku, or a full model id).
   --effort <level>           Pin the reasoning effort for all SPAWNED sessions
@@ -289,7 +279,7 @@ OPTIONS:
 PARALLEL SESSIONS:
   Each loop is isolated in its own directory: .claude/ralph-fork/{LOOP_ID}/
   Sessions are named: ralph-{LOOP_ID}-{N} (e.g., ralph-my-feature-1)
-  Managed via herdr by default, or plain tmux with --backend tmux
+  Managed via herdr (requires a running herdr server)
 
   Run multiple loops in parallel:
     Terminal 1: /ralph-loop-fork:ralph-loop-fork --checklist checklist-a.md --name "task-a"
@@ -337,7 +327,7 @@ MONITORING:
   cat .claude/ralph-fork/MY_LOOP_ID/state.json | jq
 
   # View all forked sessions:
-  tmux ls | grep ralph
+  herdr agent list | grep ralph
 HELP_EOF
       exit 0
       ;;
@@ -515,19 +505,10 @@ HELP_EOF
       COPY_PATHS="$2"
       shift 2
       ;;
-    --backend)
-      if [[ -z "${2:-}" ]]; then
-        _err "--backend requires an argument" "Allowed: tmux, herdr"
-        exit 1
-      fi
-      case "$2" in
-        tmux|herdr) BACKEND="$2" ;;
-        *)
-          _err "--backend must be 'tmux' or 'herdr'" "Got: $2"
-          exit 1
-          ;;
-      esac
-      shift 2
+    --backend|--backend=*)
+      _err "--backend was removed: herdr is the only backend" \
+        "Drop the --backend flag (tmux is no longer supported)."
+      exit 1
       ;;
     --model)
       if [[ -z "${2:-}" ]]; then
@@ -535,7 +516,7 @@ HELP_EOF
         exit 1
       fi
       # Model names are passed to 'claude --model'; restrict to safe charset
-      # since the value is interpolated into a tmux shell command.
+      # since the value is interpolated into a shell command.
       if [[ ! "$2" =~ ^[A-Za-z0-9._-]+$ ]]; then
         _err "--model contains invalid characters" "Allowed: letters, digits, dot, dash, underscore. Got: $2"
         exit 1
@@ -549,9 +530,9 @@ HELP_EOF
         _err "--effort requires a level argument" "Example: --effort medium"
         exit 1
       fi
-      # Effort is passed to 'claude --effort' and interpolated into a tmux
+      # Effort is passed to 'claude --effort' and interpolated into a
       # shell command; restrict to the CLI's documented enum.
-      # Keep in sync with the same enum in scripts/fork-terminal.sh (state
+      # Keep in sync with the same enum in scripts/fork-terminal-herdr.sh (state
       # read-back validation) and the docs in README.md + commands/.
       case "$2" in
         low|medium|high|xhigh|max) ;;
@@ -610,12 +591,12 @@ if [[ "$WORKTREE" == "true" ]] && [[ -z "$BASE_REF" ]]; then
   exit 1
 fi
 
-# In worktree mode, claude must be on PATH — we launch it ourselves via tmux
-# and tmux silently exits the inner command on missing-binary failures, so
-# the script would otherwise report success while the session dies.
+# In worktree mode, claude must be on PATH — we launch it ourselves via herdr
+# and a missing binary would otherwise leave a dead pane while the script
+# reports success.
 if [[ "$WORKTREE" == "true" ]] && ! command -v claude >/dev/null 2>&1; then
   _err "--worktree requires 'claude' on PATH" \
-    "It is launched via tmux — ensure 'claude' is available in your shell." \
+    "It is launched via herdr — ensure 'claude' is available in your shell." \
     "Run /ralph-loop-fork:init-ralph-fork --check-only to verify all dependencies."
   exit 1
 fi
@@ -643,24 +624,10 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
-if [[ "$BACKEND" == "tmux" ]] && ! command -v tmux &> /dev/null; then
-  if [[ -n "${MSYSTEM:-}" ]] || [[ "$(uname -s 2>/dev/null)" == MINGW* ]] || [[ "$(uname -s 2>/dev/null)" == MSYS* ]]; then
-    _err "tmux is required but was not found" \
-      "On Windows: tmux does not run on native Windows / Git Bash." \
-      "Install WSL2 and run this from inside WSL." \
-      "Or drop --backend tmux to use the default herdr backend instead."
-  else
-    _err "tmux is required but was not found" \
-      "Run /ralph-loop-fork:init-ralph-fork to auto-install all dependencies." \
-      "Or drop --backend tmux to use the default herdr backend instead."
-  fi
-  exit 1
-fi
-
 if [[ "$BACKEND" == "herdr" ]]; then
   if ! command -v herdr &> /dev/null; then
-    _err "herdr is required for the default herdr backend but was not found" \
-      "Install herdr, or pass --backend tmux to use tmux instead (also requires tmux on PATH)."
+    _err "herdr is required but was not found" \
+      "Install herdr and make sure it is on PATH."
     exit 1
   fi
   # Match the known-good "status: running" text rather than trust the exit
@@ -685,9 +652,8 @@ if [[ "$BACKEND" == "herdr" ]]; then
   done
   if [[ "$HERDR_REACHABLE" != "true" ]]; then
     _err "herdr server is not reachable" \
-      "The default backend is herdr, which requires a running herdr server." \
+      "herdr is the only backend and requires a running herdr server." \
       "Start it with: herdr server" \
-      "Or pass --backend tmux to use tmux instead for this run." \
       "herdr status output: $HERDR_STATUS_OUT"
     exit 1
   fi
@@ -815,11 +781,8 @@ else
     EFFORT_JSON=$(printf '%s' "$EFFORT" | jq -Rs 'rtrimstr("\n")')
   fi
 
-  # Detect current tmux session name for preserve-final-session
+  # No launcher-session tracking: the launcher is not a herdr-spawned agent
   ORIGINAL_SESSION=""
-  if [[ -n "${TMUX:-}" ]]; then
-    ORIGINAL_SESSION=$(tmux display-message -p '#S' 2>/dev/null || echo "")
-  fi
 
   # State machine flags:
   # - awaiting_checklist_update: LLM should update checklist, then hook spawns new session
@@ -1010,7 +973,7 @@ WARNING: This loop cannot be stopped manually!
 EOF
 
 # Worktree mode: relocate the loop into an isolated git worktree and launch
-# the initial Claude session there via tmux. Non-worktree mode falls through
+# the initial Claude session there via herdr. Non-worktree mode falls through
 # to the existing inline-echo flow below.
 if [[ "$WORKTREE" == "true" ]]; then
   # Persist the initial prompt so the worktree-launched Claude can read it.
@@ -1087,135 +1050,79 @@ if [[ "$WORKTREE" == "true" ]]; then
     exit 1
   fi
 
-  if [[ "$BACKEND" == "herdr" ]]; then
-    INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
-    AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
-
-    launch_profile_begin "$WORKTREE_PATH_ABS" "$(pwd)" || exit 1   # before any pane or registry row exists
-    spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$AGENT_NAME"
-    herdr_spawn_root_pane "$WORKTREE_PATH_ABS" "$AGENT_NAME" || {
-      _err "herdr pane spawn failed"
-      exit 1
-    }
-    # Row before `agent start`: the child's bind row must never precede its spawn row.
-    spawn_lineage_record "$PANE_ID" "$WS_ID"
-
-    # Env sanitation: see fork-terminal-herdr.sh's identical step — the
-    # herdr daemon's own environment may carry CLAUDECODE=1 (live-verified
-    # this session), which would otherwise silently kill the spawned claude.
-    herdr pane run "$PANE_ID" 'unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL' \
-      || echo "⚠️  env sanitation pane run failed (non-fatal, continuing)" >&2
-
-    launch_profile_prepare_pane "$WORKTREE_PATH_ABS" "$PANE_ID" || {
-      herdr pane close "$PANE_ID" 2>/dev/null || true
-      spawn_lineage_abort launch_profile_failed
-      exit 1
-    }
-
-    AGENT_START_OK=false
-    for delay in 0 0.5 1 2; do
-      if [[ "$delay" != "0" ]]; then
-        sleep "$delay"
-      fi
-      if herdr agent start "$AGENT_NAME" --kind claude --pane "$PANE_ID" -- --dangerously-skip-permissions --model "$MODEL" --effort "$EFFORT" "$RALPH_DISALLOWED_TOOLS_ARG"; then
-        AGENT_START_OK=true
-        break
-      fi
-    done
-
-    if [[ "$AGENT_START_OK" != "true" ]]; then
-      _err "herdr agent start failed after retries"
-      herdr pane close "$PANE_ID" 2>/dev/null || true
-      launch_profile_cleanup_pane "$PANE_ID"
-      spawn_lineage_abort agent_start_failed
-      exit 1
-    fi
-
-    herdr agent prompt "$AGENT_NAME" "$INIT_MSG" || {
-      echo "⚠️  herdr agent prompt reported failure" >&2
-    }
-    herdr agent send-keys "$AGENT_NAME" Enter || {
-      echo "⚠️  herdr agent send-keys Enter failed" >&2
-    }
-
-    SESSION_ENTRY=$(jq -n \
-      --arg name "$AGENT_NAME" \
-      --arg agent_name "$AGENT_NAME" \
-      --arg ws "$WS_ID" \
-      --arg pane "$PANE_ID" \
-      --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg sid "$SPAWN_LINEAGE_ID" \
-      '{name: $name, agent_name: $agent_name, workspace_id: $ws, pane_id: $pane, started_at: $started, session_number: 1} + (if $sid != "" then {spawn_id: $sid} else {} end)')
-    jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
-      "$MOVED_STATE_FILE" > "$TMP_STATE"
-    mv "$TMP_STATE" "$MOVED_STATE_FILE"
-
-    trap - EXIT
-
-    echo ""
-    echo "${GRN_O}=================================================================${RST_O}"
-    echo "${GRN_O} ✅ Worktree mode — loop started in isolation (herdr backend)${RST_O}"
-    echo "${GRN_O}=================================================================${RST_O}"
-    echo " Worktree:  $WORKTREE_PATH_ABS"
-    echo " Branch:    $BRANCH_NAME"
-    echo " Agent:     $AGENT_NAME (workspace $WS_ID, pane $PANE_ID)"
-    echo ""
-    echo " Read:      herdr agent read $AGENT_NAME"
-    echo " Cancel:    /ralph-loop-fork:cancel-ralph-fork $LOOP_ID"
-    echo ""
-    echo " When the loop finishes, merge or discard the branch:"
-    echo "   git merge $BRANCH_NAME"
-    echo "   git worktree remove $WORKTREE_PATH_ABS"
-    echo "   git branch -D $BRANCH_NAME"
-    echo "================================================================="
-    exit 0
-  fi
-
-  SESSION_NAME="ralph-$LOOP_ID-1"
   INIT_MSG="Read and execute the task in .claude/ralph-fork/$LOOP_ID/prompt.txt"
-  MODEL_FLAG=" --model $MODEL"
-  EFFORT_FLAG=" --effort $EFFORT"
-  # Unset ANTHROPIC_MODEL/CLAUDE_CODE_EFFORT_LEVEL — the tmux server's global
-  # environment can otherwise carry a leaked model/effort into the spawned
-  # session on any path where the explicit flag were ever missing. Do NOT
-  # unset ANTHROPIC_DEFAULT_*_MODEL — those are deliberate alias redirections
-  # (e.g. Bedrock).
-  FORK_CMD="unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL; export RALPH_LOOP_ACTIVE=1; claude --dangerously-skip-permissions$MODEL_FLAG$EFFORT_FLAG $RALPH_DISALLOWED_TOOLS_ARG '$INIT_MSG'"
-  spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$SESSION_NAME"
-  spawn_lineage_record "" ""
-  TMUX= tmux new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH_ABS" ${SPAWN_TMUX_ENV[@]+"${SPAWN_TMUX_ENV[@]}"} "$FORK_CMD" || {
-    spawn_lineage_abort session_create_failed
-    _err "tmux session create failed"
+  AGENT_NAME=$(herdr_derive_name "$LOOP_ID" 1)
+
+  launch_profile_begin "$WORKTREE_PATH_ABS" "$(pwd)" || exit 1   # before any pane or registry row exists
+  spawn_lineage_begin "$(pwd)" "$LOOP_ID" 1 "$MOVED_STATE_FILE" "$AGENT_NAME"
+  herdr_spawn_root_pane "$WORKTREE_PATH_ABS" "$AGENT_NAME" || {
+    _err "herdr pane spawn failed"
+    exit 1
+  }
+  # Row before `agent start`: the child's bind row must never precede its spawn row.
+  spawn_lineage_record "$PANE_ID" "$WS_ID"
+
+  # Env sanitation: see fork-terminal-herdr.sh's identical step — the
+  # herdr daemon's own environment may carry CLAUDECODE=1 (live-verified
+  # this session), which would otherwise silently kill the spawned claude.
+  herdr pane run "$PANE_ID" 'unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT ANTHROPIC_MODEL CLAUDE_CODE_EFFORT_LEVEL' \
+    || echo "⚠️  env sanitation pane run failed (non-fatal, continuing)" >&2
+
+  launch_profile_prepare_pane "$WORKTREE_PATH_ABS" "$PANE_ID" || {
+    herdr pane close "$PANE_ID" 2>/dev/null || true
+    spawn_lineage_abort launch_profile_failed
     exit 1
   }
 
-  # Record the session so cancel-ralph-fork can clean it up.
+  AGENT_START_OK=false
+  for delay in 0 0.5 1 2; do
+    if [[ "$delay" != "0" ]]; then
+      sleep "$delay"
+    fi
+    if herdr agent start "$AGENT_NAME" --kind claude --pane "$PANE_ID" -- --dangerously-skip-permissions --model "$MODEL" --effort "$EFFORT" "$RALPH_DISALLOWED_TOOLS_ARG"; then
+      AGENT_START_OK=true
+      break
+    fi
+  done
+
+  if [[ "$AGENT_START_OK" != "true" ]]; then
+    _err "herdr agent start failed after retries"
+    herdr pane close "$PANE_ID" 2>/dev/null || true
+    launch_profile_cleanup_pane "$PANE_ID"
+    spawn_lineage_abort agent_start_failed
+    exit 1
+  fi
+
+  herdr agent prompt "$AGENT_NAME" "$INIT_MSG" || {
+    echo "⚠️  herdr agent prompt reported failure" >&2
+  }
+  herdr agent send-keys "$AGENT_NAME" Enter || {
+    echo "⚠️  herdr agent send-keys Enter failed" >&2
+  }
+
   SESSION_ENTRY=$(jq -n \
-    --arg name "$SESSION_NAME" \
+    --arg name "$AGENT_NAME" \
+    --arg agent_name "$AGENT_NAME" \
+    --arg ws "$WS_ID" \
+    --arg pane "$PANE_ID" \
     --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg sid "$SPAWN_LINEAGE_ID" \
-    '{name: $name, started_at: $started, session_number: 1} + (if $sid != "" then {spawn_id: $sid} else {} end)')
+    '{name: $name, agent_name: $agent_name, workspace_id: $ws, pane_id: $pane, started_at: $started, session_number: 1} + (if $sid != "" then {spawn_id: $sid} else {} end)')
   jq --argjson entry "$SESSION_ENTRY" '.spawned_sessions += [$entry]' \
     "$MOVED_STATE_FILE" > "$TMP_STATE"
   mv "$TMP_STATE" "$MOVED_STATE_FILE"
 
-  # Auto-accept "Trust this folder" prompt (best-effort, harmless otherwise).
-  (sleep 4 && tmux send-keys -t "=$SESSION_NAME" Enter 2>/dev/null) &
-
-  # Success — release the rollback trap so a downstream `exit 0` doesn't
-  # tear the worktree back down.
   trap - EXIT
 
   echo ""
   echo "${GRN_O}=================================================================${RST_O}"
-  echo "${GRN_O} ✅ Worktree mode — loop started in isolation${RST_O}"
+  echo "${GRN_O} ✅ Worktree mode — loop started in isolation (herdr backend)${RST_O}"
   echo "${GRN_O}=================================================================${RST_O}"
   echo " Worktree:  $WORKTREE_PATH_ABS"
   echo " Branch:    $BRANCH_NAME"
-  echo " Session:   $SESSION_NAME"
+  echo " Agent:     $AGENT_NAME (workspace $WS_ID, pane $PANE_ID)"
   echo ""
-  echo " Attach:    tmux attach -t $SESSION_NAME"
-  echo " Monitor:   tmux capture-pane -t $SESSION_NAME -p -S -50"
+  echo " Read:      herdr agent read $AGENT_NAME"
   echo " Cancel:    /ralph-loop-fork:cancel-ralph-fork $LOOP_ID"
   echo ""
   echo " When the loop finishes, merge or discard the branch:"
@@ -1224,6 +1131,7 @@ if [[ "$WORKTREE" == "true" ]]; then
   echo "   git branch -D $BRANCH_NAME"
   echo "================================================================="
   exit 0
+
 fi
 
 # Output the initial prompt with RALPH LOOP CONTEXT

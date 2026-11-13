@@ -3,9 +3,9 @@
 # Unit tests for stop-hook-fork.sh's `dispatch_worktree_gc` (Trigger 0,
 # chore-worktree-gc-2026-08-05 in the AEOS "ai-agentic-coding-ready-now" repo).
 #
-# Stubs `python3` (the worktree-gc.py invocation) and `tmux` (pane pid
+# Stubs `python3` (the worktree-gc.py invocation) and `herdr` (pane pid
 # resolution) on PATH so these tests are deterministic and never spawn a
-# real detached process or touch a real tmux session/worktree.
+# real detached process or touch a real herdr pane/worktree.
 
 set -euo pipefail
 
@@ -69,15 +69,15 @@ exit 0
 EOF
 chmod +x "$STUB_BIN/python3"
 
-cat > "$STUB_BIN/tmux" <<'EOF'
+cat > "$STUB_BIN/herdr" <<'EOF'
 #!/bin/bash
-if [[ "$1" == "list-panes" ]]; then
-  echo "88888"
+if [[ "$1" == "pane" && "$2" == "process-info" ]]; then
+  echo '{"result":{"process_info":{"pane_id":"wG:p1","shell_pid":88888}}}'
   exit 0
 fi
 exit 0
 EOF
-chmod +x "$STUB_BIN/tmux"
+chmod +x "$STUB_BIN/herdr"
 
 export PATH="$STUB_BIN:$PATH"
 export SPAWN_LOG_FILE="$SPAWN_LOG"
@@ -142,7 +142,7 @@ create_state_file() {
   "bg_agent_block_count": 0,
   "worktree_path": $wt_json,
   "preserve_final_session": $preserve_final,
-  "spawned_sessions": [{"name": "$session_name", "preserved": false}]
+  "spawned_sessions": [{"name": "$session_name", "pane_id": "wG:p1", "preserved": false}]
 }
 EOF
 }
@@ -222,7 +222,7 @@ test_checklist_moved_dispatches() {
   assert_contains "--apply" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --apply"
   assert_contains "--only" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --only"
   assert_contains "--after-pid" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --after-pid"
-  assert_contains "--kill-session tmux:ralph-$loop_id-1" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --kill-session tmux:<name>"
+  assert_contains "--kill-session herdr:ralph-$loop_id-1" "$(cat "$SPAWN_LOG" 2>/dev/null)" "dispatch includes --kill-session herdr:<name>"
 
   echo ""
 }
@@ -420,7 +420,7 @@ test_orphaned_ineligible_no_dispatch() {
   "bg_agent_block_count": 0,
   "worktree_path": "$TEST_DIR/.worktrees/$loop_id",
   "preserve_final_session": false,
-  "spawned_sessions": [{"name": "ralph-$loop_id-1", "preserved": false}]
+  "spawned_sessions": [{"name": "ralph-$loop_id-1", "pane_id": "wG:p1", "preserved": false}]
 }
 EOF
   create_local_file "$loop_id"
@@ -502,7 +502,7 @@ test_budget_exhausted_no_dispatch() {
   "bg_agent_block_count": 0,
   "worktree_path": "$TEST_DIR/.worktrees/$loop_id",
   "preserve_final_session": false,
-  "spawned_sessions": [{"name": "ralph-$loop_id-1", "preserved": false}]
+  "spawned_sessions": [{"name": "ralph-$loop_id-1", "pane_id": "wG:p1", "preserved": false}]
 }
 EOF
   create_local_file "$loop_id"

@@ -1,14 +1,11 @@
 #!/bin/bash
 
-# Tests the default-backend flip (2026-08-11): --backend defaults to
-# "herdr" now, tmux is the explicit opt-in via --backend tmux. Covers:
-#   - no --backend -> state.json backend == herdr (when herdr reachable)
-#   - --backend tmux -> state.json backend == tmux, no herdr required
+# Tests that herdr is the ONLY backend (tmux removed in v0.26.0). Covers:
+#   - no flag -> state.json backend == herdr (when herdr reachable)
+#   - --backend tmux / --backend=tmux / --backend herdr -> loud error,
+#     nonzero exit, no state written (the flag no longer exists)
 #   - herdr binary missing -> loud error, exit nonzero, no state written
 #   - herdr binary present but server unreachable -> loud error (same)
-#   - tmux binary missing + default (herdr) backend -> setup SUCCEEDS
-#     (regression guard: tmux must no longer be unconditionally required)
-#   - tmux binary missing + explicit --backend tmux -> loud error (unchanged)
 
 set -uo pipefail
 
@@ -39,7 +36,7 @@ new_project() {
 
 # Builds a PATH identical to the real one but with every directory that
 # contains $1 removed -- everything else stays exactly as in the real
-# environment. (A flaky "no --backend defaults to herdr" failure was
+# environment. (A flaky "backend is herdr" failure was
 # chased into this function at one point, but it reproduced identically
 # with a completely untouched PATH -- root cause was a transient herdr
 # socket round-trip delay under back-to-back-invocation load, unrelated to
@@ -55,27 +52,30 @@ path_without() {
   echo "$new_path"
 }
 
-echo -e "${YELLOW}Test: no --backend, herdr reachable -> defaults to herdr${NC}"
+echo -e "${YELLOW}Test: herdr reachable -> backend is herdr${NC}"
 D1=$(new_project "d1")
 ( cd "$D1" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
     --checklist checklist.md --name d1test >/dev/null 2>&1 )
 BACKEND1=$(jq -r '.backend // "MISSING"' "$D1/.claude/ralph-fork/d1test/state.json" 2>/dev/null || echo "NO_STATE")
 if [[ "$BACKEND1" == "herdr" ]]; then
-  pass "no --backend defaults to herdr"
+  pass "backend is herdr"
 else
-  fail "no --backend defaults to herdr" "got: $BACKEND1"
+  fail "backend is herdr" "got: $BACKEND1"
 fi
 
-echo -e "${YELLOW}Test: --backend tmux -> explicit opt-out honored${NC}"
-D2=$(new_project "d2")
-( cd "$D2" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-    --checklist checklist.md --name d2test --backend tmux >/dev/null 2>&1 )
-BACKEND2=$(jq -r '.backend // "MISSING"' "$D2/.claude/ralph-fork/d2test/state.json" 2>/dev/null || echo "NO_STATE")
-if [[ "$BACKEND2" == "tmux" ]]; then
-  pass "--backend tmux honored"
-else
-  fail "--backend tmux honored" "got: $BACKEND2"
-fi
+for flagargs in "--backend tmux" "--backend=tmux" "--backend herdr"; do
+  echo -e "${YELLOW}Test: '$flagargs' -> removed flag fails loudly, no state${NC}"
+  D2=$(new_project "d2-${flagargs//[^a-z]/}")
+  # shellcheck disable=SC2086
+  OUT2=$( ( cd "$D2" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
+      --checklist checklist.md --name d2test $flagargs 2>&1 ) )
+  RC2=$?
+  if [[ $RC2 -ne 0 ]] && grep -q "herdr is the only backend" <<< "$OUT2" && [[ ! -f "$D2/.claude/ralph-fork/d2test/state.json" ]]; then
+    pass "'$flagargs' rejected: loud error, nonzero exit, no state"
+  else
+    fail "'$flagargs' rejected: loud error, nonzero exit, no state" "rc=$RC2 out=$OUT2"
+  fi
+done
 
 echo -e "${YELLOW}Test: herdr binary missing -> loud error, no state written${NC}"
 D3=$(new_project "d3")
@@ -112,31 +112,6 @@ if [[ $RC4 -ne 0 ]] && grep -qi "not reachable" <<< "$OUT4" && [[ ! -f "$D4/.cla
   pass "herdr unreachable: loud error, nonzero exit, no state"
 else
   fail "herdr unreachable: loud error, nonzero exit, no state" "rc=$RC4 out=$OUT4"
-fi
-
-echo -e "${YELLOW}Test: tmux missing + default backend (herdr) -> setup SUCCEEDS (regression guard)${NC}"
-D5=$(new_project "d5")
-SANDBOX5=$(path_without tmux)
-OUT5=$( ( cd "$D5" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR PATH="$SANDBOX5" bash "$SETUP_SCRIPT" \
-    --checklist checklist.md --name d5test 2>&1 ) )
-RC5=$?
-BACKEND5=$(jq -r '.backend // "MISSING"' "$D5/.claude/ralph-fork/d5test/state.json" 2>/dev/null || echo "NO_STATE")
-if [[ $RC5 -eq 0 ]] && [[ "$BACKEND5" == "herdr" ]]; then
-  pass "tmux missing, default (herdr) backend: setup succeeds without tmux"
-else
-  fail "tmux missing, default (herdr) backend: setup succeeds without tmux" "rc=$RC5 backend=$BACKEND5 out=$OUT5"
-fi
-
-echo -e "${YELLOW}Test: tmux missing + explicit --backend tmux -> loud error (unchanged)${NC}"
-D6=$(new_project "d6")
-SANDBOX6=$(path_without tmux)
-OUT6=$( ( cd "$D6" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR PATH="$SANDBOX6" bash "$SETUP_SCRIPT" \
-    --checklist checklist.md --name d6test --backend tmux 2>&1 ) )
-RC6=$?
-if [[ $RC6 -ne 0 ]] && grep -qi "tmux is required" <<< "$OUT6" && [[ ! -f "$D6/.claude/ralph-fork/d6test/state.json" ]]; then
-  pass "tmux missing, --backend tmux explicit: loud error, nonzero exit, no state"
-else
-  fail "tmux missing, --backend tmux explicit: loud error, nonzero exit, no state" "rc=$RC6 out=$OUT6"
 fi
 
 echo ""

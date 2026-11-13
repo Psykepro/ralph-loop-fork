@@ -34,13 +34,13 @@ new_project() {
   echo "$dir"
 }
 
-# Run setup (non-worktree, non-resume — no tmux spawn) and echo state.json path.
+# Run setup (non-worktree, non-resume — no pane spawn) and echo state.json path.
 # Args after the project dir are passed straight to setup-ralph-loop-fork.sh.
 run_setup() {
   local dir="$1"; shift
   local name="$1"; shift
   ( cd "$dir" && HOME="$FAKE_HOME" env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
-      --checklist checklist.md --name "$name" --backend tmux "$@" )
+      --checklist checklist.md --name "$name" "$@" )
 }
 
 state_field() {

@@ -133,7 +133,7 @@ check_dep() {
 install_hint() {
   case "$1" in
     jq)    echo "brew install jq  |  apt-get install jq  |  https://jqlang.github.io/jq/" ;;
-    tmux)  echo "brew install tmux  |  apt-get install tmux  |  https://github.com/tmux/tmux" ;;
+    herdr) echo "Install herdr and run: herdr server" ;;
     xxd)   echo "brew install vim  |  apt-get install xxd  (part of vim-common on some distros)" ;;
     git)   echo "brew install git  |  apt-get install git  |  https://git-scm.com/downloads" ;;
     claude) echo "Install Claude Code CLI — https://claude.ai/code" ;;
@@ -174,6 +174,19 @@ check_git_version() {
 }
 
 # ---------------------------------------------------------------------------
+# herdr check (the only session backend; never auto-installed)
+# ---------------------------------------------------------------------------
+check_herdr() {
+  if command -v herdr >/dev/null 2>&1; then
+    ok "herdr (session backend)"
+  else
+    fail "herdr — not found"
+    info "Install: $(install_hint herdr)"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # claude CLI check (only needed for --worktree mode)
 # ---------------------------------------------------------------------------
 check_claude() {
@@ -199,7 +212,7 @@ echo -e "${BOLD}================================================================
 echo ""
 echo -e "${BOLD}Required (always):${NC}"
 check_dep jq  jq  "jq"
-check_dep tmux tmux "tmux"
+check_herdr
 check_dep xxd xxd "xxd"
 
 echo ""

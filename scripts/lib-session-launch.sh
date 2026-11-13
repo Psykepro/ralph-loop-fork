@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Shared launch constants for every loop session spawn: session 1 and forks,
-# tmux and herdr. Sourced by setup-ralph-loop-fork.sh, fork-terminal.sh and
-# fork-terminal-herdr.sh so the four launch sites and six prompt variants
+# Shared launch constants for every loop session spawn: session 1 and forks.
+# Sourced by setup-ralph-loop-fork.sh and fork-terminal-herdr.sh so the
+# launch sites and prompt variants
 # cannot drift apart.
 
 # Iterations busy-waited on background sub-agents with ScheduleWakeup instead

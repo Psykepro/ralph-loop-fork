@@ -1,9 +1,8 @@
 # Ralph Loop Fork
 
 Fork-based Ralph Loop that keeps each session's context window fresh by
-spawning a **new terminal session** — via herdr's socket-API CLI by default,
-or plain tmux with `--backend tmux` — when a session's iteration limit is
-reached. Unlike the standard ralph-loop which re-feeds the prompt into the same session
+spawning a **new terminal session** via herdr's socket-API CLI (herdr is the
+only supported backend) when a session's iteration limit is reached. Unlike the standard ralph-loop which re-feeds the prompt into the same session
 until context accumulates and the model degrades, this version forks a
 brand-new Claude process at the configured boundary and tracks all state in
 files so work persists across sessions.
@@ -63,8 +62,7 @@ Restart Claude Code — plugins are discovered at startup. Then run:
 | Dependency | Required | Notes |
 |---|---|---|
 | `jq` | Always | JSON state management |
-| `herdr` (server running) | Default backend | Session forking; skip with `--backend tmux` |
-| `tmux` | `--backend tmux` only | Session forking for the tmux backend |
+| `herdr` (server running) | Always | Session backend (spawn/kill/list); not auto-installed |
 | `xxd` | Always | Loop ID generation |
 | `git ≥ 2.5` | `--worktree` only | Worktree subcommand |
 | `claude` CLI | `--worktree` only | Launched inside the worktree |
@@ -84,22 +82,23 @@ Manual install if you prefer:
 
 ```bash
 # macOS
-brew install tmux jq
+brew install jq
 
 # Debian / Ubuntu
-sudo apt install tmux jq xxd
+sudo apt install jq xxd
 
 # Arch
-sudo pacman -S tmux jq vim   # xxd is part of vim on Arch
+sudo pacman -S jq vim   # xxd is part of vim on Arch
+
+# All platforms: install herdr and start its server (herdr server)
 ```
 
 For checklist-progress hashing the script tries `md5sum` → `md5 -q` → `shasum` — no extra install on a standard system.
 
 ## Portability
 
-Targets macOS, Linux, and Windows under **WSL2**. tmux does not run on native
-Windows / Git Bash; install WSL2 and run from inside WSL. The init command
-detects this and prints guidance.
+Targets macOS and Linux wherever herdr runs. The init command reports a
+missing herdr binary.
 
 ---
 
@@ -212,7 +211,7 @@ the main branch is never touched until you choose to merge.
 1. `git worktree add .worktrees/feat-x -b ralph/feat-x main` creates the worktree on a new branch forked from `--base-ref` (here `main`).
 2. A curated set of files is copied in: `CLAUDE.md`, `.claude/skills`, `.claude/commands`, `.claude/settings*.json`, `.claude/ralph-fork/` (excluding `.archive/`), the checklist directory, every `.env*` file at the root, plus anything from `--copy-paths`.
 3. The freshly-created loop state directory is moved into the worktree.
-4. The initial Claude session is launched inside the worktree via tmux. All forked sessions continue running there — `fork-terminal.sh` and `stop-hook-fork.sh` need zero changes to follow along.
+4. The initial Claude session is launched inside the worktree via herdr. All forked sessions continue running there — `fork-terminal-herdr.sh` and `stop-hook-fork.sh` need zero changes to follow along.
 
 **Why use it:**
 
@@ -265,13 +264,13 @@ in the loop's `state.json`.
 |--------|---------|-------------|
 | `--checklist <path>` | **required** | Path to checklist markdown file |
 | `--command <cmd>` | null | Slash command run at the start of each session |
-| `--name <id>` | auto 8-char hex | Loop identifier; used for tmux session names and state directory |
+| `--name <id>` | auto 8-char hex | Loop identifier; used for herdr agent names and state directory |
 | `--total-budget <n>` | 100 | Hard cap on total iterations across all sessions |
 | `--max-per-session <n>` | 1 | Iterations before forking a new session |
 | `--completion-promise <text>` | null | Phrase Claude must output in `<promise>` tags to end the loop |
 | `--on-completion <cmd>` | null | Slash command run once after successful completion |
 | `--stop-hook-reminders <text\|path>` | built-in default (always included) | Extra text APPENDED to every stop-hook prompt after the built-in default; string or `.md` file |
-| `--preserve-final-session` | false | Keep the final tmux session alive after completion |
+| `--preserve-final-session` | false | Keep the final herdr session alive after completion |
 | `--no-cleanup` | false | Never kill any spawned sessions |
 | `--worktree` | false | Run the loop inside an isolated git worktree (see **Worktree Mode**) |
 | `--no-worktree` | (default) | Explicit opt-out; documents intent |
@@ -336,7 +335,7 @@ Every time a session tries to exit, the stop hook fires and decides what to do:
 2. **Promise check** — if `<promise>...</promise>` is present and all checklist items are `[x]`, move toward completion.
 3. **Budget check** — if `total_budget` is exhausted, exit cleanly.
 4. **Session limit** — if this session hasn't reached `max-per-session`, re-feed the prompt in the same session.
-5. **Fork** — otherwise, spawn a new tmux session and rotate the token.
+5. **Fork** — otherwise, spawn a new herdr session and rotate the token.
 
 **Background sub-agents.** While sub-agents launched by the session are still pending, the stop hook defers silently: it does not fork, and it does not hold the session open. The session ends its turn, and each task notification re-invokes it. Loop sessions are spawned with `--disallowedTools=ScheduleWakeup`, and the iteration prompt tells them to end the turn instead of polling. Without this, sessions have been observed spending about half their tokens re-scheduling wakeups. For a genuine timed wait on external work, use a single `Bash` command with `run_in_background`.
 
@@ -365,13 +364,11 @@ hook again it cannot interfere.
 This means:
 - Parallel loops with different `--name` values never cross-trigger each other's hooks.
 - A slow or crashed session that recovers late cannot cause a double-fork.
-- You can `tmux attach` to any session for inspection without disrupting the loop.
+- You can `herdr agent read` any session for inspection without disrupting the loop.
 
 ### Session management
 
-Sessions are named `ralph-{LOOP_ID}-{N}` regardless of backend.
-
-**Default backend (herdr):**
+Sessions are named `ralph-{LOOP_ID}-{N}`.
 
 ```bash
 # Watch all active ralph sessions
@@ -383,20 +380,6 @@ herdr agent read ralph-auth-refactor-2
 # The loop manages cleanup automatically on completion
 # For manual intervention:
 herdr pane close <pane_id>   # get pane_id from `herdr agent list`
-```
-
-**`--backend tmux`:**
-
-```bash
-# Watch all active ralph sessions
-tmux ls | grep ralph
-
-# Attach to a specific session for inspection (read-only is fine)
-tmux attach -t ralph-auth-refactor-2
-
-# The loop manages cleanup automatically on completion
-# For manual intervention:
-tmux kill-session -t ralph-auth-refactor-1
 ```
 
 State for each loop lives in `.claude/ralph-fork/{LOOP_ID}/`:
@@ -435,7 +418,7 @@ This prevents false completion claims when work is not actually done.
 # List active loops (shows iterations/budget per loop)
 /ralph-loop-fork:cancel-ralph-fork --list
 
-# Cancel a specific loop — kills its tmux sessions + removes state
+# Cancel a specific loop — closes its herdr panes + removes state
 /ralph-loop-fork:cancel-ralph-fork auth-refactor
 
 # Cancel all loops (archives are preserved)
@@ -446,10 +429,10 @@ This prevents false completion claims when work is not actually done.
 ```
 
 > **Cancel vs. complete**: `cancel-ralph-fork` removes the state directory
-> *without* archiving it and kills all associated tmux sessions. Normally
+> *without* archiving it and closes all associated herdr panes. Normally
 > completed loops are moved to `.claude/ralph-fork/.archive/` automatically.
 
-> **Stuck loops**: If a tmux session is killed while Claude is responding to a BLOCK (e.g., updating the checklist), the continuation cycle never fires and the loop stays `active=true` permanently. The stop hook auto-recovers these on the next session start. For bulk manual cleanup, use `--all-stuck`.
+> **Stuck loops**: If a herdr pane is closed while Claude is responding to a BLOCK (e.g., updating the checklist), the continuation cycle never fires and the loop stays `active=true` permanently. The stop hook auto-recovers these on the next session start. For bulk manual cleanup, use `--all-stuck`.
 
 ---
 
@@ -465,11 +448,11 @@ cat .claude/ralph-fork/auth-refactor/state.json | jq
 # View current session prompt
 head -20 .claude/ralph-fork/auth-refactor/local.md
 
-# Watch all ralph tmux sessions
-tmux ls | grep ralph
+# Watch all ralph sessions
+herdr agent list | grep ralph
 
-# Attach to a running session
-tmux attach -t ralph-auth-refactor-2
+# Read a running session
+herdr agent read ralph-auth-refactor-2
 
 # View debug log
 tail -f "${RALPH_FORK_LOG_DIR:-/tmp/ralph-fork-logs}/ralph-fork-$(date +%Y-%m-%d).log"
@@ -546,7 +529,7 @@ A project may ship `.claude/hooks/lib/launch_profile.py`. When that helper exist
 PATH shim in a per-pane scratch dir (same idea as an account-wrapper alias). If the helper exits
 non-zero the spawn is refused with its message and nothing is created, so a session never starts
 under an unverified setup. No helper, no change in behavior. The shim dir is removed wherever the
-plugin closes the pane. The tmux backend does not use the helper. Test: `tests/test-launch-profile.sh`.
+plugin closes the pane. Test: `tests/test-launch-profile.sh`.
 
 ### Inheriting the parent session's account env (herdr, no helper needed)
 
@@ -576,7 +559,7 @@ Test: `tests/test-inherit-account-env.sh`.
 | Context handling | Accumulates every iteration | Fresh context each fork |
 | Session count | 1 | Multiple (one per fork) |
 | Best for | Short tasks | Long, complex, multi-session tasks |
-| Visibility | Single terminal | Named tmux sessions |
+| Visibility | Single terminal | Named herdr agents |
 | State persistence | Single local file | Isolated per loop in `.claude/ralph-fork/` |
 | Parallel loops | No | Yes — via `--name` |
 | Hook isolation | N/A | Session tokens prevent cross-session triggers |
@@ -589,10 +572,10 @@ Test: `tests/test-inherit-account-env.sh`.
 | Issue | Solution |
 |-------|----------|
 | Commands not recognized after install | Run `/reload-plugins` — no restart needed |
-| `tmux is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. On Windows: install WSL2 and run from inside WSL. |
+| `herdr is required but was not found` | Install herdr; verify with `/ralph-loop-fork:init-ralph-fork`. |
 | `jq is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. |
-| Fork not spawning | Verify tmux: `tmux -V` |
-| Session already exists error | Remove stale session: `tmux kill-session -t ralph-LOOP_ID-N` |
+| Fork not spawning | Verify herdr: `herdr status` |
+| Leftover sessions | Close them: `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` |
 | State corrupted | Cancel and restart: `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` |
 | Loop stuck `active=true` (session killed mid-BLOCK) | Run `/ralph-loop-fork:cancel-ralph-fork --all-stuck` to bulk-cancel, or just start a new session — the stop hook auto-recovers on the next run |
 | Loop ID conflict | Use a unique `--name` or omit it for auto-generated ID |
@@ -622,7 +605,7 @@ ralph-loop-fork/
 ├── scripts/
 │   ├── setup-ralph-loop-fork.sh     # Initialisation script
 │   ├── setup-worktree.sh            # Worktree creation + file population
-│   ├── fork-terminal.sh             # tmux fork spawner
+│   ├── fork-terminal-herdr.sh       # herdr fork spawner
 │   ├── lib-session-launch.sh        # Shared launch flags + iteration prompt text
 │   ├── lib-launch-profile.sh        # Optional project launch-profile helper (herdr)
 │   └── cancel-ralph-loop-fork.sh    # Cancel / list script

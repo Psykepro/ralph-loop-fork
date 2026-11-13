@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # Spawn-lineage tests: fork scripts record loop-node lineage rows, export the
-# SPAWN_* env to the child, and never break a spawn. Hermetic herdr/tmux stubs;
+# SPAWN_* env to the child, and never break a spawn. Hermetic herdr stubs;
 # the fixture repo has NO AEOS files (standalone plugin use).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HERDR_FORK="$SCRIPT_DIR/scripts/fork-terminal-herdr.sh"
-TMUX_FORK="$SCRIPT_DIR/scripts/fork-terminal.sh"
 BIND_HOOK="$SCRIPT_DIR/hooks/spawn-bind-hook.py"
 SWEEP_HOOK="$SCRIPT_DIR/hooks/spawn-sweep-hook.py"
 REG="$SCRIPT_DIR/scripts/spawn_registry.py"
@@ -34,11 +33,6 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 H
-cat > "$STUBS/tmux" <<'T'
-#!/bin/bash
-{ printf 'CALL: '; for a in "$@"; do printf '%q ' "$a"; done; printf '\n'; } >> "$STUB_LOG"
-exit 0
-T
 chmod +x "$STUBS"/*
 export STUB_LOG="$TMP/stub.log"
 
@@ -96,13 +90,6 @@ R5="$TMP/r5"; mk_repo "$R5"; : > "$STUB_LOG"
 OUT=$(SPAWN_REGISTRY_DIR=relative/dir PATH="$STUBS:$PATH" bash "$HERDR_FORK" lp 2 "$R5" 2>&1); RC=$?
 check "exit 0 despite bad SPAWN_REGISTRY_DIR" "[[ $RC -eq 0 ]]" "$OUT"
 check "visible ⚠️ lineage line on stderr" "grep -q 'lineage' <<<'$OUT'" "$OUT"
-
-echo "Test 6: tmux fork passes -e SPAWN_* and records the row"
-R6="$TMP/r6"; mk_repo "$R6"; : > "$STUB_LOG"
-OUT=$(PATH="$STUBS:$PATH" bash "$TMUX_FORK" lp 2 "$R6" 2>&1); RC=$?
-check "exit 0" "[[ $RC -eq 0 ]]" "$OUT"
-check "tmux new-session has -e SPAWN_ID=" "grep 'new-session' '$STUB_LOG' | grep -q -- '-e SPAWN_ID=sp-'" "$(cat "$STUB_LOG")"
-check "row recorded" "rows '$R6' | grep -q '\"loop_id\":\"lp\"'" "$(rows "$R6")"
 
 echo "Test 7: SessionStart bind hook"
 R7="$TMP/r7"; mk_repo "$R7"; mkdir -p "$R7/.claude/spawn-registry"

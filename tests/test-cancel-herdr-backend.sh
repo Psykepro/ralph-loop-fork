@@ -2,8 +2,8 @@
 
 # Tests cancel-ralph-loop-fork.sh's herdr-backend branch: a loop whose
 # state.json has "backend": "herdr" must be cancelled via `herdr pane
-# close <pane_id>` (the stored, authoritative pane_id), never via `tmux
-# kill-session`. Hermetic `herdr` CLI stub, no real server required.
+# close <pane_id>` (the stored, authoritative pane_id).
+# Hermetic `herdr` CLI stub, no real server required.
 
 set -uo pipefail
 
@@ -46,16 +46,6 @@ cat > "$REPO_DIR/.claude/ralph-fork/$LOOP_ID/state.json" <<EOF
 }
 EOF
 
-# Stub tmux: if this is ever called, that's a bug (herdr-backend loops must
-# never touch tmux). Fails loudly so the test catches a backend-dispatch
-# regression.
-cat > "$STUB_DIR/tmux" <<'STUBT'
-#!/bin/bash
-echo "TMUX CALLED (should never happen for a herdr-backend loop): $*" >&2
-exit 1
-STUBT
-chmod +x "$STUB_DIR/tmux"
-
 # Stub herdr: records every call, succeeds on pane close.
 cat > "$STUB_DIR/herdr" <<'STUBH'
 #!/bin/bash
@@ -72,7 +62,7 @@ chmod +x "$STUB_DIR/herdr"
 export STUB_HERDR_LOG_PATH="$HERDR_LOG"
 export PATH="$STUB_DIR:$PATH"
 
-echo -e "${YELLOW}Test 1: cancelling a herdr-backend loop closes panes, never touches tmux${NC}"
+echo -e "${YELLOW}Test 1: cancelling a herdr-backend loop closes panes${NC}"
 
 cd "$REPO_DIR" || exit 1
 OUTPUT=$(bash "$CANCEL_SCRIPT" "$LOOP_ID" 2>&1)
@@ -82,12 +72,6 @@ if [[ $RC -eq 0 ]]; then
   pass "cancel-ralph-loop-fork.sh exited 0"
 else
   fail "cancel-ralph-loop-fork.sh exited $RC" "$OUTPUT"
-fi
-
-if grep -q "TMUX CALLED" <<< "$OUTPUT"; then
-  fail "tmux was invoked for a herdr-backend loop" "$OUTPUT"
-else
-  pass "tmux was never invoked (correct backend dispatch)"
 fi
 
 if grep -q "pane close wA:p1" "$HERDR_LOG"; then

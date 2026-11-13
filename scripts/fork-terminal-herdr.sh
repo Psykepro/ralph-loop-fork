@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# herdr-backend Fork Terminal Script for Ralph Loop Fork
-# Sibling to fork-terminal.sh (the tmux backend) -- same job, herdr's
-# socket-API CLI instead of tmux. See D2 in
+# Fork Terminal Script for Ralph Loop Fork (herdr is the only backend,
+# via herdr's socket-API CLI). See D2 in
 # _project/specs/feature-ralph-loop-fork-herdr-backend-2026-08-09.md
 # (AEOS repo) for the full design rationale and the live evidence behind
 # each herdr call shape below.
@@ -38,7 +37,7 @@ PROMPT_FILE="$LOOP_DIR/prompt.txt"
 CWD="$PROJECT_ROOT"
 
 if ! command -v herdr &> /dev/null; then
-  echo "Error: herdr is required for --backend herdr but was not found." >&2
+  echo "Error: herdr is required but was not found." >&2
   echo "   Install it and ensure 'herdr server' is running." >&2
   exit 1
 fi
@@ -61,7 +60,7 @@ COMMAND=$(jq -r '.command // ""' "$STATE_FILE")
 STOP_HOOK_REMINDERS=$(jq -r '.stop_hook_reminders // ""' "$STATE_FILE")
 # Built-in defaults — MUST match scripts/setup-ralph-loop-fork.sh's
 # DEFAULT_MODEL/DEFAULT_EFFORT (pinned by tests/test-model-resolution.sh),
-# same fallback pattern fork-terminal.sh uses.
+# state read-back fallback.
 DEFAULT_MODEL="sonnet"
 DEFAULT_EFFORT="medium"
 
@@ -280,10 +279,8 @@ mv "${STATE_FILE}.tmp" "$STATE_FILE"
 echo "Herdr agent $AGENT_NAME started ($HERDR_SPAWN_KIND in workspace $WS_ID, pane $PANE_ID)"
 
 # ============================================================================
-# CLEANUP OLD SESSIONS — herdr equivalent of fork-terminal.sh's tmux
-# cleanup block. Detached, best-effort, never blocks this script's own
-# exit. Logged (not /dev/null) so a failed reap is recoverable — unlike
-# the tmux path's equivalent block, which does discard output.
+# CLEANUP OLD SESSIONS. Detached, best-effort, never blocks this script's own
+# exit. Logged (not /dev/null) so a failed reap is recoverable.
 # ============================================================================
 OLD_PANES=$(jq -r '.spawned_sessions[]?.pane_id // empty' "$STATE_FILE" 2>/dev/null)
 CURRENT_PANE="$PANE_ID"

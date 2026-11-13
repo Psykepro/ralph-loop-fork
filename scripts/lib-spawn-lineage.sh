@@ -2,13 +2,13 @@
 
 # Spawn lineage for loop sessions: one registry `spawn` row per launched
 # session, child env carrying SPAWN_* so its SessionStart hook can bind.
-# Sourced by setup-ralph-loop-fork.sh, fork-terminal.sh, fork-terminal-herdr.sh.
+# Sourced by setup-ralph-loop-fork.sh and fork-terminal-herdr.sh.
 # Lineage is best-effort: every failure prints one visible line and returns 0,
 # so a spawn is never broken by it. Kill-switch: SPAWN_REGISTRY_DISABLE=1.
 #
 # Usage (per launch):
 #   spawn_lineage_begin  <project_root> <loop_id> <iteration> <state_file> <name>
-#   ... create pane/session passing "${SPAWN_HERDR_ENV[@]}" / "${SPAWN_TMUX_ENV[@]}" ...
+#   ... create pane passing "${SPAWN_HERDR_ENV[@]}" ...
 #   spawn_lineage_record [pane_id] [workspace_id]   # before the agent starts (bind race)
 #   spawn_lineage_abort <reason>                    # if the launch then fails
 # The loop node is synthesized at read time from `loop_id`; its parent is the
@@ -16,7 +16,6 @@
 
 _SL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPAWN_HERDR_ENV=()
-SPAWN_TMUX_ENV=()
 SPAWN_LINEAGE_ID=""
 
 _sl_reg() { python3 "$_SL_DIR/spawn_registry.py" --root "$_SL_ROOT" "$@"; }
@@ -24,7 +23,7 @@ _sl_warn() { echo "⚠️  spawn-registry: $* (loop continues, lineage not recor
 
 spawn_lineage_begin() {
   _SL_ROOT="$1" _SL_LOOP="$2" _SL_ITER="$3" _SL_STATE="$4" _SL_NAME="$5"
-  SPAWN_HERDR_ENV=() SPAWN_TMUX_ENV=() SPAWN_LINEAGE_ID=""
+  SPAWN_HERDR_ENV=() SPAWN_LINEAGE_ID=""
   [[ "${SPAWN_REGISTRY_DISABLE:-}" == "1" ]] && return 0
   if ! command -v python3 >/dev/null 2>&1; then
     _sl_warn "python3 not found"; return 0
@@ -41,7 +40,6 @@ spawn_lineage_begin() {
   local e
   for e in "${kv[@]}"; do
     SPAWN_HERDR_ENV+=(--env "$e")
-    SPAWN_TMUX_ENV+=(-e "$e")
   done
   SPAWN_LINEAGE_ID="$id"
 }

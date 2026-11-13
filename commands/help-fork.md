@@ -12,7 +12,7 @@ Ralph Loop Fork extends the original Ralph Wiggum technique with **terminal fork
 - Fresh context window each iteration (no context accumulation)
 - Better for long-running, complex tasks
 - State persists across sessions via files
-- Parallel execution visibility via tmux
+- Parallel execution visibility via herdr
 - **Run multiple loops simultaneously** with isolated state
 
 **Core concept:**
@@ -102,8 +102,8 @@ Manage active Ralph Loop Fork sessions.
 
 **What it does:**
 - `--list`: Shows all active loops with their status
-- `LOOP_ID`: Removes state files and tmux sessions for that loop
-- `--all`: Removes all loops and all ralph-* tmux sessions
+- `LOOP_ID`: Removes state files and closes the herdr panes for that loop
+- `--all`: Removes all loops and closes their herdr panes
 
 ---
 
@@ -132,7 +132,7 @@ Each loop is fully isolated:
     └── prompt.txt
 ```
 
-Sessions are named `ralph-{LOOP_ID}-{N}` and managed via tmux.
+Sessions are named `ralph-{LOOP_ID}-{N}` and managed via herdr.
 
 ---
 
@@ -155,7 +155,7 @@ Pass `--worktree` to run the entire loop inside a git worktree. The loop's commi
 1. Creates a worktree at `<worktree-base>/<loop-id>` on a new branch `ralph/<loop-id>`.
 2. Copies the minimum set of files into the worktree: `CLAUDE.md`, a curated subset of `.claude/` (`skills`, `commands`, `settings*.json`), `.claude/ralph-fork/` (excluding `.archive/`), the checklist directory, all `.env*` files, plus anything passed via `--copy-paths`.
 3. Moves the freshly-created loop state into the worktree.
-4. Launches the initial Claude session via tmux inside the worktree. All forked sessions run there as well — no extra wiring needed.
+4. Launches the initial Claude session via herdr inside the worktree. All forked sessions run there as well — no extra wiring needed.
 
 **Flags:**
 
@@ -268,9 +268,9 @@ Stop Event
 | Feature | /ralph-loop | /ralph-loop-fork:ralph-loop-fork |
 |---------|-------------|------------------|
 | Context accumulation | Yes (grows each iteration) | No (fresh each fork) |
-| Session count | 1 | Multiple (via tmux) |
+| Session count | 1 | Multiple (via herdr) |
 | Best for | Short tasks | Long, complex tasks |
-| Visibility | Single terminal | tmux sessions |
+| Visibility | Single terminal | herdr panes |
 | State persistence | Local file only | Global + local files |
 | Parallel support | No | Yes (via --name) |
 
@@ -287,13 +287,13 @@ cat .claude/ralph-fork/my-feature/state.json | jq
 head -10 .claude/ralph-fork/my-feature/local.md
 
 # List all forked sessions:
-tmux ls | grep ralph
+herdr agent list | grep ralph
 
 # List sessions for specific loop:
-tmux ls | grep my-feature
+herdr agent list | grep my-feature
 
-# Attach to a session:
-tmux attach -t ralph-my-feature-1
+# Read a session:
+herdr agent read ralph-my-feature-1
 ```
 
 ## Example Workflow
@@ -330,7 +330,7 @@ Each iteration:
 /ralph-loop-fork:ralph-loop-fork --name "xss-training" @skill-xss.md --completion-promise "TRAINED"
 
 # Monitor both
-tmux ls | grep ralph
+herdr agent list | grep ralph
 ```
 
 ## Dependencies
@@ -340,14 +340,11 @@ Run `/ralph-loop-fork:init-ralph-fork` to check and auto-install all dependencie
 | Dependency | Required | Notes |
 |---|---|---|
 | `jq` | Always | JSON state |
-| `tmux` | Always | Session forking |
+| `herdr` | Always | Session backend (a running `herdr server` is required) |
 | `xxd` | Always | Loop ID generation |
 | `git ≥ 2.5` | `--worktree` only | Worktree subcommand |
 | `claude` CLI | `--worktree` only | Launched inside worktree |
 | `uuidgen` | Optional | Falls back to `/dev/urandom` |
-
-On Windows: tmux does not run on native Windows / Git Bash. Install WSL2 and
-run this plugin from inside WSL.
 
 ## Configuration
 
@@ -361,10 +358,10 @@ run this plugin from inside WSL.
 
 | Issue | Solution |
 |-------|----------|
-| `tmux is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. On Windows install WSL2. |
+| `herdr is required but was not found` | Install herdr; check with `/ralph-loop-fork:init-ralph-fork`. |
 | `jq is required but was not found` | Run `/ralph-loop-fork:init-ralph-fork`. |
-| Fork not spawning | Check tmux is running: `tmux ls` |
-| Session exists error | Previous run left sessions; `tmux kill-session -t ralph-ID-N` |
+| Fork not spawning | Check herdr is running: `herdr status` |
+| Leftover sessions | Previous run left panes; `/ralph-loop-fork:cancel-ralph-fork ID` |
 | No progress detected | Ensure you're modifying the checklist file |
 | State corrupted | `/ralph-loop-fork:cancel-ralph-fork LOOP_ID` and restart |
 | Loop ID conflict | Use unique `--name` or let it auto-generate |

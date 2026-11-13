@@ -3,7 +3,7 @@
 # End-to-end test for setup-worktree.sh (Phase 1 of --worktree mode)
 # and the worktree-cancel hint in cancel-ralph-loop-fork.sh.
 #
-# This test does NOT launch claude or tmux — it exercises the file-system
+# This test does NOT launch claude or herdr — it exercises the file-system
 # and state-manipulation parts of the worktree flow, which is what
 # previously had only manual coverage.
 
