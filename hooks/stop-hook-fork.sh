@@ -212,6 +212,11 @@ move_checklist_to_done() {
     debug_log "move_checklist_to_done: Single file detected: $source_path"
   elif [[ "$grandparent_name" == "in-progress" ]]; then
     # Split-plan directory: checklists/in-progress/feature-foo/MASTER.md
+    # Only the MASTER finishes the plan; a sub-checklist's loop leaves its open siblings in place.
+    if [[ "$(basename "$checklist_path")" != MASTER* ]]; then
+      debug_log "move_checklist_to_done: sub-checklist of a split plan - plan folder stays (checklist=$checklist_path)"
+      return 1
+    fi
     source_path="$parent_dir"
     done_dir="$grandparent_dir/../done"
     debug_log "move_checklist_to_done: Split-plan directory detected: $source_path"
