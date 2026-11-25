@@ -857,6 +857,22 @@ EOF
 
 fi
 
+# Split plan: scope session 1 to the first open sub-checklist and record the
+# completed-row count it starts from (the stop hook forks when it rises).
+WORK_LINE="- This is session $SESSION_NUMBER. Work through the checklist until complete."
+SPLIT_CHECKLIST="${CHECKLIST_FILE:-$(jq -r '.checklist_file // ""' "$STATE_FILE" 2>/dev/null)}"
+if [[ -n "$SPLIT_CHECKLIST" ]] && [[ -f "$SPLIT_CHECKLIST" ]]; then
+  SPLIT_STATUS=$(split_plan_status "$SPLIT_CHECKLIST") || SPLIT_STATUS="0:0:"
+  SPLIT_DONE=$(cut -d: -f2 <<<"$SPLIT_STATUS")
+  if [[ $(( ${SPLIT_STATUS%%:*} + SPLIT_DONE )) -gt 0 ]]; then
+    jq ".split_done_at_session_start = $SPLIT_DONE" "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE" \
+      || _err "Cannot record the split-plan baseline in $STATE_FILE" "Check the file is writable JSON"
+    SPLIT_SCOPE=$(split_scope_text "$SPLIT_CHECKLIST")
+    [[ -n "$SPLIT_SCOPE" ]] && WORK_LINE="- This is session $SESSION_NUMBER.
+$SPLIT_SCOPE"
+  fi
+fi
+
 # Quote completion promise for YAML if it contains special chars or is not null
 if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
   COMPLETION_PROMISE_YAML="\"$COMPLETION_PROMISE\""
@@ -881,7 +897,7 @@ if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
-- This is session 1. Work through the checklist until complete.
+$WORK_LINE
 - When ALL work is COMPLETE, output: <promise>$COMPLETION_PROMISE</promise>
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
@@ -913,7 +929,7 @@ else
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
-- This is session 1. Work through the checklist until complete.
+$WORK_LINE
 
 $RALPH_PARALLEL_SUBAGENTS_TEXT
 - Do NOT audit previous sessions by inspecting ~/.claude/projects/ directories, subagents/

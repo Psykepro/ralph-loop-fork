@@ -127,26 +127,15 @@ build_terminal_sequence() {
 }
 
 # ============================================================================
-# CHECKLIST COUNTING FUNCTION
+# CHECKLIST COUNTING + SPLIT-PLAN STATUS (count_checklist_items,
+# strip_session_notes, split_plan_status, split_scope_text)
+# Loaded from this hook's own checkout, never CLAUDE_PLUGIN_ROOT, so the hook
+# and its counters can never come from two different versions.
 # ============================================================================
-count_checklist_items() {
-  local checklist_file="$1"
-
-  if [[ ! -f "$checklist_file" ]]; then
-    echo "0:0"
-    return 1
-  fi
-
-  local unchecked
-  unchecked=$(grep -c '^\s*-\s*\[ \]' "$checklist_file" 2>/dev/null) || true
-  unchecked="${unchecked:-0}"
-
-  local checked
-  checked=$(grep -c '^\s*-\s*\[[xX]\]' "$checklist_file" 2>/dev/null) || true
-  checked="${checked:-0}"
-
-  echo "$unchecked:$checked"
-}
+if ! source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/lib-session-launch.sh"; then
+  echo "❌ ralph-loop-fork: cannot load scripts/lib-session-launch.sh — stop hook disabled for this stop" >&2
+  exit 0
+fi
 
 # ============================================================================
 # GIT DIRTY CHECK FOR CHECKLIST FILE
@@ -1116,18 +1105,6 @@ hash_stdin() {
   md5 2>/dev/null || md5sum 2>/dev/null | awk '{print $1}'
 }
 
-# Strips mandatory "### Session N Notes" sections (header line through the
-# next "#"/"##"/"###" heading, exclusive) out of checklist content before
-# counting ticks. Without this, ticked-looking lines a session copies into its
-# notes would register as progress every round and mask a genuinely stuck loop.
-strip_session_notes() {
-  awk '
-    /^### Session [0-9]+ Notes/ { skip=1; next }
-    /^(# |## |### )/ { skip=0 }
-    !skip { print }
-  ' "$1"
-}
-
 # Number of ticked items across the plan dir (the checklist's directory, flat):
 # "- [x]"/"- [X]" lines plus "🟢 completed" status rows, notes sections
 # excluded. Prints the count (0 is valid); non-zero exit = error (caller fails
@@ -1420,6 +1397,9 @@ BG_AGENT_BLOCK_COUNT=$(jq -r '.bg_agent_block_count // 0' "$STATE_FILE" 2>/dev/n
 # because an external delegated-work lock (see check_minion_gate below) is
 # still present. Mirrors the awaiting_<noun> naming convention.
 AWAITING_MINION=$(jq -r '.awaiting_minion // false' "$STATE_FILE" 2>/dev/null) || AWAITING_MINION="false"
+# awaiting_refeed: this hook re-fed the same session (max_per_session > 1), so
+# the next stop arrives as a continuation and must be evaluated, not dropped.
+AWAITING_REFEED=$(jq -r '.awaiting_refeed // false' "$STATE_FILE" 2>/dev/null) || AWAITING_REFEED="false"
 
 # Parse local state
 FRONTMATTER=$(awk '/^---$/{i++; next} i==1' "$LOCAL_FILE") || true
@@ -1430,6 +1410,38 @@ COMPLETION_PROMISE=$(echo "$FRONTMATTER" | grep '^completion_promise:' | sed 's/
 
 debug_log "State: budget=$TOTAL_BUDGET, iterations=$TOTAL_ITERATIONS, session=$SESSION_NUMBER"
 debug_log "Flags: awaiting_checklist_update=$AWAITING_CHECKLIST_UPDATE, awaiting_confirmation=$AWAITING_CONFIRMATION, executing_on_completion=$EXECUTING_ON_COMPLETION, awaiting_background_agents=$AWAITING_BACKGROUND_AGENTS, bg_agent_block_count=$BG_AGENT_BLOCK_COUNT, awaiting_minion=$AWAITING_MINION"
+
+# ============================================================================
+# SPLIT-PLAN FACTS (computed once per stop)
+# A master checklist whose status table tracks sub-checklists runs ONE sub per
+# session. split_done_at_session_start is the 🟢 row count when this session
+# started (written by setup / fork-terminal-herdr.sh); a higher count now
+# means this session finished a sub and the next one gets a fresh session.
+# ============================================================================
+SPLIT_OPEN=0
+SPLIT_DONE=0
+SPLIT_NEXT=""
+SPLIT_SCOPE=""
+SPLIT_BOUNDARY_CROSSED=false
+if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+  _SPLIT=$(split_plan_status "$CHECKLIST_PATH") || _SPLIT="0:0:"
+  SPLIT_OPEN=${_SPLIT%%:*}
+  SPLIT_NEXT=${_SPLIT##*:}
+  SPLIT_DONE=$(cut -d: -f2 <<<"$_SPLIT")
+  if [[ $((SPLIT_OPEN + SPLIT_DONE)) -gt 0 ]]; then
+    SPLIT_SCOPE=$(split_scope_text "$CHECKLIST_PATH")
+    SPLIT_BASELINE=$(jq -r '.split_done_at_session_start // empty' "$STATE_FILE" 2>/dev/null) || SPLIT_BASELINE=""
+    if [[ ! "$SPLIT_BASELINE" =~ ^[0-9]+$ ]]; then
+      info "⚠️  Ralph Loop Fork [$LOOP_ID]: no split-plan baseline recorded for this session — using the current count ($SPLIT_DONE completed sub-checklists); a sub finished earlier in this session will not force a fork"
+      update_state "$STATE_FILE" ".split_done_at_session_start = $SPLIT_DONE"
+      SPLIT_BASELINE=$SPLIT_DONE
+    fi
+    if [[ $SPLIT_OPEN -gt 0 ]] && [[ $SPLIT_DONE -gt $SPLIT_BASELINE ]]; then
+      SPLIT_BOUNDARY_CROSSED=true
+    fi
+    debug_log "Split plan: open=$SPLIT_OPEN done=$SPLIT_DONE baseline=$SPLIT_BASELINE next=$SPLIT_NEXT crossed=$SPLIT_BOUNDARY_CROSSED"
+  fi
+fi
 
 # ============================================================================
 # EXTERNAL DELEGATED WORK GATE (awaiting_minion)
@@ -1604,6 +1616,14 @@ if [[ "$STOP_HOOK_ACTIVE" == "false" ]]; then
     BG_AGENT_BLOCK_COUNT=0
   fi
 
+  # Case 4b: awaiting_refeed stuck — the re-fed turn never stopped through
+  # the hook. Clear it; this fresh stop is evaluated normally.
+  if [[ "$AWAITING_REFEED" == "true" ]]; then
+    debug_log "STALE-STATE: awaiting_refeed=true + stop_hook_active=false — clearing stale flag"
+    update_state "$STATE_FILE" ".awaiting_refeed = false"
+    AWAITING_REFEED="false"
+  fi
+
   # Case 5: awaiting_minion stuck — session killed while waiting on external
   # delegated work. Never just clear it: re-check the lock directly, since
   # the wait may still be legitimate. check_minion_gate always exits.
@@ -1723,7 +1743,18 @@ if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
     debug_log "CONTINUATION: awaiting_minion=true - re-checking lock"
     check_minion_gate
   else
-    if [[ "$USED_WORKTREE_FALLBACK" == "true" ]]; then
+    if [[ "$AWAITING_REFEED" == "true" ]]; then
+      # The turn this hook re-fed has ended: evaluate it in the normal flow
+      # (promise, split boundary, next re-feed or the iteration-limit fork).
+      # Bounded: every re-feed raises the local iteration toward max_per_session.
+      debug_log "CONTINUATION: awaiting_refeed=true - falling through to normal flow"
+      update_state "$STATE_FILE" ".awaiting_refeed = false"
+    elif [[ "$SPLIT_BOUNDARY_CROSSED" == "true" ]]; then
+      # A sub-checklist finished during this continuation turn: fall through so
+      # the single split-boundary fork site below runs (after the budget, API
+      # error, background-agent and BLOCKER.md gates).
+      debug_log "CONTINUATION: split boundary crossed - falling through to normal flow"
+    elif [[ "$USED_WORKTREE_FALLBACK" == "true" ]]; then
       # Worktree mode: we previously BLOCKed to get Claude's status declaration.
       # Claude's response is now in the transcript (continuation turns ARE written
       # even when the initial herdr-launched session is not). Fall through to the
@@ -2015,6 +2046,27 @@ else
 fi
 
 # ============================================================================
+# STATE MACHINE: SPLIT-PLAN BOUNDARY
+# A sub-checklist turned 🟢 during this session and another is still open:
+# fork a fresh session for it, regardless of max_per_session or a promise
+# (completion is impossible while a row is open). Never re-feed this session.
+# Runs before the transcript is read: every status/re-feed prompt below names
+# the next open sub as this session's work, which is exactly the wrong turn here.
+# ============================================================================
+if [[ "$SPLIT_BOUNDARY_CROSSED" == "true" ]]; then
+  debug_log "TRANSITION: RUNNING → FORK (split boundary: $SPLIT_DONE done, next $SPLIT_NEXT)"
+  info "Ralph Loop Fork [$LOOP_ID]: sub-checklist finished this session — forking a fresh session for $SPLIT_NEXT ($SPLIT_OPEN open)"
+  info ""
+
+  NEW_SESSION_NUMBER=$((SESSION_NUMBER + 1))
+  update_state "$STATE_FILE" ".awaiting_checklist_update = false | .awaiting_confirmation = false | .total_iterations = $NEW_TOTAL_ITERATIONS | .session_number = $NEW_SESSION_NUMBER | .awaiting_background_agents = false | .bg_agent_block_count = 0 | .executing_on_completion = false"
+  rm -f "$LOCAL_FILE"
+
+  spawn_new_session "$LOOP_ID" "$NEW_SESSION_NUMBER" "$STATE_FILE" "$PLUGIN_ROOT" "$PROJECT_ROOT"
+  exit 0
+fi
+
+# ============================================================================
 # READ LAST ASSISTANT MESSAGE
 # ============================================================================
 if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH" 2>/dev/null; then
@@ -2046,7 +2098,7 @@ where the initial conversation turn is not written to the .jsonl transcript.
 CURRENT CHECKLIST STATE: ${CHECKED_COUNT} checked, ${UNCHECKED_COUNT} unchecked
 
 $(if [[ -n "$CHECKLIST_CONTENT" ]]; then echo "=== CHECKLIST ===" && echo "$CHECKLIST_CONTENT" && echo "=== END CHECKLIST ==="; fi)
-
+$(if [[ -n "$SPLIT_SCOPE" ]]; then printf '\n%s\n' "$SPLIT_SCOPE"; fi)
 Choose exactly ONE of the following actions:
 
 A) You completed some (but not all) work this session:
@@ -2210,11 +2262,11 @@ CURRENT CHECKLIST STATUS: $CHECKED_COUNT checked, $UNCHECKED_COUNT unchecked
 
 $(if [[ -n "$CHECKLIST_CONTENT" ]]; then echo "=== CHECKLIST ===" && echo "$CHECKLIST_CONTENT" && echo "=== END CHECKLIST ==="; fi)
 
-═══════════════════════════════════════════════════════════════════════════════
+$(if [[ -n "$SPLIT_SCOPE" ]]; then echo "$SPLIT_SCOPE"; else echo "═══════════════════════════════════════════════════════════════════════════════
 CRITICAL: ALL CHECKLIST ITEMS MUST BE COMPLETED - NO EXCEPTIONS!
 ═══════════════════════════════════════════════════════════════════════════════
 
-Every item in the checklist MUST be finished. No skipping, no deferring, no partial work.
+Every item in the checklist MUST be finished. No skipping, no deferring, no partial work."; fi)
 
 REQUIRED ACTIONS:
 1. Update the checklist file - mark completed items with [x]
@@ -2461,7 +2513,10 @@ You output <promise>$COMPLETION_PROMISE</promise> but $UNCHECKED items are still
 === CHECKLIST ($CHECKED checked, $UNCHECKED unchecked) ===
 $CHECKLIST_CONTENT
 === END CHECKLIST ===
+$(if [[ -n "$SPLIT_SCOPE" ]]; then echo "
+Sub-checklist rows that are not 🟢 count as unchecked items.
 
+$SPLIT_SCOPE"; else echo "
 ═══════════════════════════════════════════════════════════════════════════════
 CRITICAL: ALL CHECKLIST ITEMS MUST BE COMPLETED - NO EXCEPTIONS!
 ═══════════════════════════════════════════════════════════════════════════════
@@ -2477,7 +2532,7 @@ REQUIRED ACTIONS:
 1. Review each unchecked [ ] item
 2. If genuinely complete: mark as [x]
 3. If NOT complete: FINISH IT NOW, then mark as [x]
-4. Only output the promise when EVERY SINGLE item is [x]$(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; then echo "
+4. Only output the promise when EVERY SINGLE item is [x]"; fi)$(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; then echo "
 
 === REMINDERS ===
 $STOP_HOOK_REMINDERS
@@ -2731,12 +2786,13 @@ else
     fi
 
     REMAINING=$((MAX_PER_SESSION - LOCAL_ITERATION))
+    update_state "$STATE_FILE" ".awaiting_refeed = true"
 
     REFEED_PROMPT="RALPH LOOP: CONTINUE WORKING (Session $SESSION_NUMBER, Iteration $NEW_ITERATION/$MAX_PER_SESSION)
 
 You have $REMAINING more iteration(s) available in this session before a fresh session is forked.
 
-Continue working on the checklist until all items are complete.
+$(if [[ -n "$SPLIT_SCOPE" ]]; then echo "$SPLIT_SCOPE"; else echo "Continue working on the checklist until all items are complete."; fi)
 
 CURRENT STATUS: $CHECKED_COUNT checked, $UNCHECKED_COUNT unchecked
 
@@ -2789,14 +2845,15 @@ $(if [[ -n "$STOP_HOOK_REMINDERS" ]] && [[ "$STOP_HOOK_REMINDERS" != "null" ]]; 
 $STOP_HOOK_REMINDERS
 === END REMINDERS ==="; fi)
 
-═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: ALL CHECKLIST ITEMS MUST BE COMPLETED - NO EXCEPTIONS!
+$(if [[ -n "$SPLIT_SCOPE" ]]; then echo "SPLIT PLAN — this session's sub-checklist is $SPLIT_NEXT and its turn budget is used up.
+- Tick the boxes you finished in $SPLIT_NEXT; mark its master row 🟢 only if all its boxes are ticked and committed.
+- Do NOT start another sub-checklist. The next session continues with the first row that is not 🟢."; else echo "═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: EVERY CHECKLIST ITEM GETS COMPLETED - NO EXCEPTIONS!
 ═══════════════════════════════════════════════════════════════════════════════
 
 Every item in the checklist MUST be finished, regardless of priority, difficulty, or time.
-If an item is in the checklist, IT MUST BE COMPLETED. No skipping, no deferring, no partial work.
-
-Continue working through ALL items until EVERY SINGLE ONE is marked [x].
+No skipping, no deferring, no partial work. Items you did not finish stay [ ] and the
+next session continues them - do not start new items now."; fi)
 
 REQUIRED ACTIONS:
 1. Mark completed items with [x]

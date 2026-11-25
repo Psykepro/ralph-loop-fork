@@ -106,8 +106,24 @@ if [[ -n "$CHECKLIST_PATH" ]] && [[ "$CHECKLIST_PATH" != "null" ]] && [[ "$CHECK
   CHECKLIST_PATH="$PROJECT_ROOT/$CHECKLIST_PATH"
 fi
 
+# Split plan: scope this session to the first open sub-checklist and record the
+# completed-row count it starts from (the stop hook forks when it rises).
+SPLIT_SCOPE=""
+SPLIT_BASELINE_FILTER=""
+if [[ -n "$CHECKLIST_PATH" ]] && [[ -f "$CHECKLIST_PATH" ]]; then
+  SPLIT_STATUS=$(split_plan_status "$CHECKLIST_PATH") || SPLIT_STATUS="0:0:"
+  SPLIT_DONE=$(cut -d: -f2 <<<"$SPLIT_STATUS")
+  if [[ $(( ${SPLIT_STATUS%%:*} + SPLIT_DONE )) -gt 0 ]]; then
+    SPLIT_SCOPE=$(split_scope_text "$CHECKLIST_PATH")
+    SPLIT_BASELINE_FILTER=" | .split_done_at_session_start = $SPLIT_DONE"
+  fi
+fi
+WORK_LINE="- This is a continuation session. Work through the checklist until complete."
+[[ -n "$SPLIT_SCOPE" ]] && WORK_LINE="- This is a continuation session.
+$SPLIT_SCOPE"
+
 NEW_SESSION_ID=$(uuidgen 2>/dev/null | tr -d '-' | head -c 16 || head -c 16 /dev/urandom | xxd -p | head -c 16)
-jq ".session_id = \"$NEW_SESSION_ID\" | del(.session_token)" "$STATE_FILE" > "${STATE_FILE}.tmp"
+jq ".session_id = \"$NEW_SESSION_ID\" | del(.session_token)$SPLIT_BASELINE_FILTER" "$STATE_FILE" > "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
 SESSION_ID="$NEW_SESSION_ID"
 echo "Generated new session token: $SESSION_ID (old sessions will be invalidated)"
@@ -157,7 +173,7 @@ if [[ -n "$COMPLETION_PROMISE" ]] && [[ "$COMPLETION_PROMISE" != "null" ]]; then
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
-- This is a continuation session. Work through the checklist until complete.
+$WORK_LINE
 - When ALL work is COMPLETE, output: <promise>$COMPLETION_PROMISE</promise>
 - Only output the promise when the statement is completely TRUE.
 - Do NOT lie to exit the loop.
@@ -181,7 +197,7 @@ else
 
 ---
 RALPH LOOP CONTEXT (Loop: $LOOP_ID, Session $SESSION_NUMBER, Token: $SESSION_ID):
-- This is a continuation session. Work through the checklist until complete.
+$WORK_LINE
 
 $RALPH_PARALLEL_SUBAGENTS_TEXT
 

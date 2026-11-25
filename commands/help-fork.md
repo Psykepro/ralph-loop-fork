@@ -62,13 +62,16 @@ Start a fork-based Ralph loop.
 - `--copy-paths "<a b c>"` - Extra files/dirs to copy into the worktree (space-separated inside a single quoted arg)
 
 **Checklist Validation:**
-When using `--completion-promise`, the loop validates that all checklist items are marked `[x]` before accepting completion. If unchecked items remain, the completion is rejected and a self-validation prompt is triggered.
+When using `--completion-promise`, the loop validates that all checklist items are marked `[x]` before accepting completion. If unchecked items remain, the completion is rejected and a self-validation prompt is triggered. In a split-plan master, every sub-checklist status-table row that is not `🟢` counts as an unchecked item.
+
+**Split plans:** a master checklist with a status table of sub-checklists (`| 1 | sub-01-x.md | 🔴 pending |`) runs ONE sub-checklist per session. Each session works only the first row that is not 🟢, finishes it, marks it 🟢 and stops; the stop hook then forks a fresh session for the next sub-checklist, regardless of `--max-per-session`.
 
 **How it works:**
 1. Creates `.claude/ralph-fork/{LOOP_ID}/` directory with isolated state
 2. You work on the task
 3. When you try to exit:
-   - If completion promise detected: Stop (success!)
+   - If a split-plan sub-checklist turned 🟢 this session and another is open: Fork to **NEW** terminal for the next sub-checklist
+   - If completion promise detected and every item (and every split-plan row) is done: confirm, then stop (success!)
    - If total budget exhausted: Stop
    - If current iteration < `--max-per-session`: Re-feed prompt in the **same** session (same context window, fresh block)
    - If `--max-per-session` reached: Fork to **NEW** terminal (fresh context window)

@@ -10,6 +10,13 @@ files so work persists across sessions.
 With the default `--max-per-session 1` every exit triggers a fork. Set it
 higher to allow multiple re-feed iterations within one session before forking.
 
+**Split plans run one sub-checklist per session.** When the checklist is a
+master whose status table tracks sub-checklists (`| 1 | sub-01-x.md | 🔴 pending |`,
+`🟢 completed` when done), each session is told to work only the first row that is
+not 🟢, finish it, mark it 🟢 and stop. As soon as the 🟢 count rises during a
+session, the stop hook forks a fresh session for the next sub-checklist, whatever
+`--max-per-session` says. The completion promise is rejected while any row is not 🟢.
+
 **Supports parallel sessions**: run multiple independent loops simultaneously,
 each fully isolated.
 
@@ -332,10 +339,11 @@ Session 1              Session 2              Session 3
 Every time a session tries to exit, the stop hook fires and decides what to do:
 
 1. **Token check** — confirms this event belongs to the active session (see below); stale events are silently dropped.
-2. **Promise check** — if `<promise>...</promise>` is present and all checklist items are `[x]`, move toward completion.
-3. **Budget check** — if `total_budget` is exhausted, exit cleanly.
-4. **Session limit** — if this session hasn't reached `max-per-session`, re-feed the prompt in the same session.
-5. **Fork** — otherwise, spawn a new herdr session and rotate the token.
+2. **Budget check** — if `total_budget` is exhausted, exit cleanly.
+3. **Split-plan boundary** — if the checklist is a split master and a sub-checklist row turned 🟢 during this session while another row is still open, fork a fresh session for the next sub-checklist (before any promise or re-feed handling).
+4. **Promise check** — if `<promise>...</promise>` is present and all checklist items are `[x]` (and, for a split master, every status row is 🟢), move toward completion.
+5. **Session limit** — if this session hasn't reached `max-per-session`, re-feed the prompt in the same session. The stop that ends a re-fed turn is evaluated the same way (state flag `awaiting_refeed`).
+6. **Fork** — otherwise, spawn a new herdr session and rotate the token.
 
 **Background sub-agents.** While sub-agents launched by the session are still pending, the stop hook defers silently: it does not fork, and it does not hold the session open. The session ends its turn, and each task notification re-invokes it. Loop sessions are spawned with `--disallowedTools=ScheduleWakeup`, and the iteration prompt tells them to end the turn instead of polling. Without this, sessions have been observed spending about half their tokens re-scheduling wakeups. For a genuine timed wait on external work, use a single `Bash` command with `run_in_background`.
 
@@ -606,7 +614,7 @@ ralph-loop-fork/
 │   ├── setup-ralph-loop-fork.sh     # Initialisation script
 │   ├── setup-worktree.sh            # Worktree creation + file population
 │   ├── fork-terminal-herdr.sh       # herdr fork spawner
-│   ├── lib-session-launch.sh        # Shared launch flags + iteration prompt text
+│   ├── lib-session-launch.sh        # Shared launch flags, prompt text, checklist counters + split-plan scope
 │   ├── lib-launch-profile.sh        # Optional project launch-profile helper (herdr)
 │   └── cancel-ralph-loop-fork.sh    # Cancel / list script
 ├── commands/
@@ -614,6 +622,7 @@ ralph-loop-fork/
 │   ├── cancel-ralph-fork.md         # Cancel command
 │   └── help-fork.md                 # Help command
 ├── tests/
+│   ├── test-split-plan-boundary.sh
 │   ├── test-state-tracking.sh
 │   └── test-stop-hook-states.sh
 ├── CONTRIBUTING.md
