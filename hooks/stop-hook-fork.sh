@@ -51,6 +51,9 @@ LOG_RETENTION_DAYS="${RALPH_LOG_RETENTION_DAYS:-90}"
 # of consecutive unchanged-set defers before fail-open override.
 BG_AGENT_WINDOW_MIN="${RALPH_BG_AGENT_WINDOW_MIN:-45}"
 BG_AGENT_MAX_DEFERS="${RALPH_BG_AGENT_MAX_DEFERS:-2}"
+# Minimum minutes an unchanged set stays parked before the override: extra
+# stop fires (other Stop hooks re-waking the session) are not evidence of loss.
+BG_AGENT_MIN_PARK_MIN="${RALPH_BG_AGENT_MIN_PARK_MIN:-$BG_AGENT_WINDOW_MIN}"
 BG_OVERRIDE="false"
 # Log directory is configurable via RALPH_FORK_LOG_DIR; defaults to
 # ${TMPDIR:-/tmp}/ralph-fork-logs for portability across macOS and Linux.
@@ -930,25 +933,29 @@ bg_pending_signature() {
   } | sort | cksum | cut -d' ' -f1
 }
 
-# Escalation: defers with an unchanged pending set reach BG_AGENT_MAX_DEFERS →
-# fail-open (clear the flag, fork). Updates state; sets BG_OVERRIDE=true when
+# Escalation: defers with an unchanged pending set reach BG_AGENT_MAX_DEFERS
+# AND that set has been parked BG_AGENT_MIN_PARK_MIN minutes → fail-open (clear the flag, fork). Updates state; sets BG_OVERRIDE=true when
 # overriding so the RUNNING gate does not re-park. Not called via $(...) -
 # the globals must survive.
 bg_defer_or_override() {
-  local sig prev_sig prev_count new_count
+  local sig prev_sig prev_count new_count now since parked_min
   sig=$(bg_pending_signature "$HOOK_INPUT" "$TRANSCRIPT_PATH")
   prev_sig=$(jq -r '.bg_agent_pending_sig // ""' "$STATE_FILE" 2>/dev/null)
+  since=$(jq -r '.bg_agent_pending_since // ""' "$STATE_FILE" 2>/dev/null)
+  now=$(date +%s)
   prev_count=$BG_AGENT_BLOCK_COUNT
-  if [[ -n "$prev_sig" && "$prev_sig" != "$sig" ]]; then new_count=1; else new_count=$((prev_count + 1)); fi
-  if [[ $new_count -ge $BG_AGENT_MAX_DEFERS ]]; then
-    local reason="pending background set unchanged for $new_count consecutive stop-hook fires (cap $BG_AGENT_MAX_DEFERS); no notification arrived - assumed lost, forking anyway"
+  if [[ -n "$prev_sig" && "$prev_sig" != "$sig" ]]; then new_count=1; since=$now; else new_count=$((prev_count + 1)); fi
+  [[ "$since" =~ ^[0-9]+$ ]] || since=$now
+  parked_min=$(( (now - since) / 60 ))
+  if [[ $new_count -ge $BG_AGENT_MAX_DEFERS && $parked_min -ge $BG_AGENT_MIN_PARK_MIN ]]; then
+    local reason="pending background set unchanged for $new_count consecutive stop-hook fires over $parked_min min (cap $BG_AGENT_MAX_DEFERS, floor $BG_AGENT_MIN_PARK_MIN min); no notification arrived - assumed lost, forking anyway"
     info "Ralph Loop Fork [$LOOP_ID]: BG-AGENT OVERRIDE - $reason"
     debug_log "BG AGENTS OVERRIDE: $reason (sig=$sig)"
-    update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0 | .bg_agent_pending_sig = null | .bg_agent_override_reason = \"$reason\""
+    update_state "$STATE_FILE" ".awaiting_background_agents = false | .bg_agent_block_count = 0 | .bg_agent_pending_sig = null | .bg_agent_pending_since = null | .bg_agent_override_reason = \"$reason\""
     AWAITING_BACKGROUND_AGENTS="false"; BG_AGENT_BLOCK_COUNT=0; BG_OVERRIDE="true"
     return 0
   fi
-  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = $new_count | .bg_agent_pending_sig = \"$sig\""
+  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = $new_count | .bg_agent_pending_sig = \"$sig\" | .bg_agent_pending_since = $since"
 }
 
 compute_pending_background_work() {
@@ -1824,7 +1831,7 @@ BG_PENDING=$(compute_pending_background_work "$HOOK_INPUT" "$TRANSCRIPT_PATH")
 [[ "$BG_OVERRIDE" == "true" ]] && BG_PENDING=0
 if [[ $BG_PENDING -gt 0 ]]; then
   debug_log "RUNNING: $BG_PENDING pending background agents detected — deferring silently, no block"
-  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1 | .bg_agent_pending_sig = \"$(bg_pending_signature "$HOOK_INPUT" "$TRANSCRIPT_PATH")\""
+  update_state "$STATE_FILE" ".awaiting_background_agents = true | .bg_agent_block_count = 1 | .bg_agent_pending_sig = \"$(bg_pending_signature "$HOOK_INPUT" "$TRANSCRIPT_PATH")\" | .bg_agent_pending_since = $(date +%s)"
   exit 0
 fi
 

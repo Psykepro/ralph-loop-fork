@@ -421,6 +421,7 @@ else
   fail "Configured window ignored"
 fi
 
+export RALPH_BG_AGENT_MIN_PARK_MIN=0  # tests 16-18 exercise the fire cap alone
 section "Test 16: continuation, SAME pending set at defer #2 (default cap 2) → override: clear flag, record reason, no silent park"
 LOOP="test-bg-16"; make_state "$LOOP"; make_local "$LOOP"
 T=$(mktemp "$TEST_DIR/t16.XXXXXX.jsonl"); make_transcript "$T" "$LOOP" 0 0 "waiting"
@@ -454,6 +455,19 @@ if echo "$LOUD" | grep -qi "bg.agent.*override\|override.*background"; then
   pass "Loud override line on stderr"
 else
   fail "No loud override line; stderr=[$LOUD]"
+fi
+
+unset RALPH_BG_AGENT_MIN_PARK_MIN
+section "Test 19: SAME pending set at defer #2 but parked < RALPH_BG_AGENT_MIN_PARK_MIN → keep deferring (live agents are not killed)"
+LOOP="test-bg-19"; make_state "$LOOP"; make_local "$LOOP"
+T=$(mktemp "$TEST_DIR/t19.XXXXXX.jsonl"); make_transcript "$T" "$LOOP" 0 0 "waiting"
+run_hook "$LOOP" "$T" false "$BT" >/dev/null || true
+OUT2=$(run_hook "$LOOP" "$T" true "$BT" 2>/dev/null || true)
+if [[ -z "$OUT2" && "$(state_field $LOOP '.awaiting_background_agents')" == "true" \
+   && -z "$(state_field $LOOP '.bg_agent_override_reason // ""')" ]]; then
+  pass "Fresh unchanged set inside the time floor keeps deferring"
+else
+  fail "Fresh agents overridden: awaiting=$(state_field $LOOP '.awaiting_background_agents') reason=$(state_field $LOOP '.bg_agent_override_reason')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
