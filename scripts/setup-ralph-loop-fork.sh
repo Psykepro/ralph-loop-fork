@@ -194,7 +194,7 @@ STOP_HOOK_REMINDERS=""
 # tool's own timeout, ends the turn, and — with no run_in_background task
 # pending — the Stop hook has no reason to defer, so it forks a fresh session
 # that just re-runs the same blocking login and repeats forever.
-DEFAULT_STOP_HOOK_REMINDER="IMPORTANT: any interactive/human-attended blocking command (SSO login, OAuth device flow, browser-based auth, or anything else that pauses waiting on a human outside this session) MUST be launched via Bash with run_in_background:true, then waited on with Monitor (poll-until-done), never as a plain foreground Bash call. A plain foreground call will hit the Bash tool's timeout before the human finishes, end the turn, and cause this loop to fork a new session that just repeats the same blocked command."
+DEFAULT_STOP_HOOK_REMINDER="IMPORTANT: any interactive/human-attended blocking command (SSO login, OAuth device flow, browser-based auth, or anything else that pauses waiting on a human outside this session) MUST be launched via Bash with run_in_background:true, then waited on with Monitor (poll-until-done), never as a plain foreground Bash call. A plain foreground call will hit the Bash tool's timeout before the human finishes, end the turn, and cause this loop to fork a new session that just repeats the same blocked command. Create and append files with the Write or Edit tool, never a shell heredoc or a command that reads stdin (cat > f, bare sort): this shell's stdin never closes, so such a command waits forever and the loop stops forking. Run long tests with run_in_background plus Monitor."
 WORKTREE=false
 WORKTREE_BASE=".worktrees"
 BRANCH_NAME=""

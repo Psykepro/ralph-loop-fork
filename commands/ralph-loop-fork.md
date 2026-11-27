@@ -87,7 +87,7 @@ The on-completion command runs AFTER:
 
 ## Stop Hook Reminders
 
-A built-in default reminder (about launching interactive/human-attended blocking commands like SSO logins via `run_in_background` + `Monitor`, never as a plain foreground call) is ALWAYS included, even if `--stop-hook-reminders` is not passed. Use `--stop-hook-reminders` to add custom reminders on top — custom text APPENDS after the built-in default, it does not replace it.
+A built-in default reminder (about launching interactive/human-attended blocking commands like SSO logins via `run_in_background` + `Monitor`, never as a plain foreground call, and about creating files with Write/Edit instead of a heredoc or any command that reads stdin) is ALWAYS included, even if `--stop-hook-reminders` is not passed. Use `--stop-hook-reminders` to add custom reminders on top — custom text APPENDS after the built-in default, it does not replace it.
 
 ```bash
 # Pass reminders as a string

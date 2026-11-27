@@ -513,6 +513,15 @@ else
     "non-empty, mentions run_in_background" "$REMINDERS_VAL"
 fi
 
+# Test 12a2: the default also tells loop sessions to write files with Write/Edit, never a stdin-reading
+# command: the loop shell's stdin never closes, so `cat > f` waits forever and the loop stops forking
+if grep -q "Write or Edit tool" <<< "$REMINDERS_VAL" && grep -q "reads stdin" <<< "$REMINDERS_VAL"; then
+  pass "Default stop-hook-reminders warns against stdin-reading commands"
+else
+  fail "Default stop-hook-reminders warns against stdin-reading commands" \
+    "mentions the Write or Edit tool and commands that read stdin" "$REMINDERS_VAL"
+fi
+
 # Test 12b: explicit --stop-hook-reminders APPENDS after the built-in default
 (cd "$SETUP_DIR" && env -u CLAUDE_PROJECT_DIR bash "$SETUP_SCRIPT" \
   --checklist checklist.md --name removrtest --stop-hook-reminders "custom text" >/dev/null 2>&1)
